@@ -127,7 +127,7 @@ final class PlaceRepository {
      * Endpoint attempts, at most two at once. Separate from the single-threaded
      * queue above, which owns one search from start to finish.
      */
-    private final ExecutorService net = Executors.newFixedThreadPool(2, r -> {
+    private final ExecutorService net = Executors.newFixedThreadPool(3, r -> {
         Thread t = new Thread(r, "mawary-net-ep");
         t.setDaemon(true);
         t.setPriority(Thread.MIN_PRIORITY);
@@ -157,10 +157,22 @@ final class PlaceRepository {
      * to a regular-expression search over names, which Overpass does natively.
      */
     private static final String[][] TOPICS = {
-            {"\u5c71\u5cb3|\u5c71|\u5cf0|peak|mountain", "natural=peak", "natural=volcano"},
+            {"\u89b3\u5149|\u540d\u6240|\u307f\u3069\u3053\u308d|\u898b\u3069\u3053\u308d|sight",
+                    "tourism=attraction", "tourism=viewpoint", "tourism=museum", "tourism=theme_park", "tourism=zoo", "tourism=aquarium"},
+            {"\u666f\u52dd|\u7d76\u666f|\u5c55\u671b|\u773a\u3081|scenic",
+                    "tourism=viewpoint", "natural=peak", "waterway=waterfall", "tourism=attraction"},
+            {"\u53f2\u8de1|\u65e7\u8de1|\u907a\u8de1|\u6b74\u53f2|historic", "historic"},
+            {"\u535a\u7269\u9928|\u7f8e\u8853\u9928|\u8cc7\u6599\u9928|museum",
+                    "tourism=museum", "tourism=artwork"},
+            {"\u904a\u5712\u5730|theme", "tourism=theme_park"},
+            {"\u52d5\u7269\u5712|zoo", "tourism=zoo"},
+            {"\u6c34\u65cf\u9928|aquarium", "tourism=aquarium"},
+            {"\u6edd|waterfall", "waterway=waterfall"},
+            {"\u6d77\u6c34\u6d74|\u30d3\u30fc\u30c1|\u7802\u6d5c|beach", "natural=beach"},
+            {"\u5c71\u5cb3|\u5cf0|\u767b\u5c71|peak|mountain",
+                    "natural=peak", "natural=volcano"},
             {"\u99c5|\u9244\u9053|station", "railway=station", "railway=halt"},
             {"\u30b3\u30f3\u30d3\u30cb|konbini", "shop=convenience"},
-            {"\u5e97|\u8cb7\u3044\u7269|\u30b7\u30e7\u30c3\u30d7|shop", "shop"},
             {"\u98df\u4e8b|\u30ec\u30b9\u30c8\u30e9\u30f3|\u98ef|\u98df\u5802|restaurant",
                     "amenity=restaurant", "amenity=fast_food"},
             {"\u30ab\u30d5\u30a7|\u55ab\u8336|cafe", "amenity=cafe"},
@@ -169,8 +181,9 @@ final class PlaceRepository {
             {"\u75c5\u9662|\u533b\u9662|\u30af\u30ea\u30cb\u30c3\u30af|hospital",
                     "amenity=hospital", "amenity=clinic"},
             {"\u5bfa|\u795e\u793e|\u6559\u4f1a|temple|shrine", "amenity=place_of_worship"},
-            {"\u6e29\u6cc9|\u9280\u6e6f|onsen", "natural=hot_spring", "amenity=public_bath"},
-            {"\u30db\u30c6\u30eb|\u5bbf|\u65c5\u9928|hotel", "tourism=hotel", "tourism=guest_house"},
+            {"\u6e29\u6cc9|\u92ad\u6e6f|\u98a8\u5442|onsen", "amenity=public_bath"},
+            {"\u30db\u30c6\u30eb|\u5bbf|\u65c5\u9928|hotel",
+                    "tourism=hotel", "tourism=guest_house"},
             {"\u9280\u884c|bank", "amenity=bank"},
             {"\u90f5\u4fbf|post", "amenity=post_office"},
             {"\u30c8\u30a4\u30ec|toilet", "amenity=toilets"},
@@ -178,7 +191,8 @@ final class PlaceRepository {
             {"\u6e56|\u6c60|lake", "natural=water"},
             {"\u57ce|castle", "historic=castle"},
             {"\u5cf6|island", "place=island"},
-            {"\u89b3\u5149|\u540d\u6240|sight", "tourism=attraction", "tourism=viewpoint"},
+            {"\u8cb7\u3044\u7269|\u30b7\u30e7\u30c3\u30d7|\u5e97|shop", "shop"},
+            {"\u5c71|yama", "natural=peak", "natural=volcano"},
     };
 
     /** What a wide, unfiltered sweep looks for. */
@@ -460,6 +474,40 @@ final class PlaceRepository {
                     status = ctx.getString(R.string.err_google, shortMessage(e));
                 }
             }
+            // A word the user typed is Nominatim's job: it answers in well
+            // under a second and does not refuse, where Overpass is slow and
+            // often will not answer at all. It matches by token rather than by
+            // substring, so a miss here still falls through to Overpass.
+            if ((result == null || result.isEmpty())
+                    && !query.isEmpty() && topicFor(query) == null) {
+                try {
+                    List<Poi> hits = Nominatim.search(query, lat, lon, radiusM);
+                    if (!hits.isEmpty()) {
+                        result = hits;
+                        source = sourceOsm;
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "nominatim failed (" + shortMessage(e) + ")");
+                }
+            }
+
+            // Photon for everything else: the keyless source that answers in
+            // about two seconds and does not refuse.
+            if (result == null || result.isEmpty()) {
+                String[][] groups = photonGroups(radiusM);
+                if (groups != null) {
+                    try {
+                        List<Poi> got = Photon.nearby(groups, lat, lon, radiusM, net);
+                        if (!got.isEmpty()) {
+                            result = nearest(got, lat, lon, OVERPASS_LIMIT);
+                            source = sourceOsm;
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "photon failed", e);
+                    }
+                }
+            }
+
             if (result == null || result.isEmpty()) {
                 try {
                     List<Poi> osm = fetchOverpass(lat, lon, radiusM);
@@ -687,6 +735,55 @@ final class PlaceRepository {
         return out;
     }
 
+    /**
+     * What to ask Photon for, or null when Photon is the wrong tool.
+     *
+     * <p>Each entry is one request. Photon returns fifty results per request
+     * whatever is asked of it, so splitting the sweep by kind of place is what
+     * makes it reach past the nearest few hundred metres.
+     */
+    private String[][] photonGroups(int radiusM) {
+        if (!query.isEmpty()) {
+            String[] tags = topicFor(query);
+            // A bare word needs a substring match, and Photon matches prefixes.
+            if (tags == null) return null;
+            // Photon gives fifty per request, so a topic with several tags is
+            // split up rather than having them compete for one fifty.
+            return chunk(photonTags(tags), 2);
+        }
+        if (radiusM > WIDE_RADIUS) {
+            return new String[][]{
+                    {"natural:peak", "natural:volcano"},
+                    {"railway:station", "tourism:attraction", "tourism:viewpoint"},
+                    {"historic:castle", "amenity:hospital", "amenity:university"},
+            };
+        }
+        return new String[][]{
+                {"amenity"},
+                {"shop"},
+                {"leisure", "tourism", "office", "railway:station"},
+        };
+    }
+
+    /** Breaks a tag list into requests of at most {@code per} tags each. */
+    private static String[][] chunk(String[] tags, int per) {
+        int groups = (tags.length + per - 1) / per;
+        String[][] out = new String[groups][];
+        for (int g = 0; g < groups; g++) {
+            int from = g * per, to = Math.min(tags.length, from + per);
+            out[g] = new String[to - from];
+            System.arraycopy(tags, from, out[g], 0, to - from);
+        }
+        return out;
+    }
+
+    /** Overpass writes a tag as key=value; Photon writes it as key:value. */
+    private static String[] photonTags(String[] tags) {
+        String[] out = new String[tags.length];
+        for (int i = 0; i < tags.length; i++) out[i] = tags[i].replace('=', ':');
+        return out;
+    }
+
     /** The keys that make something a place worth showing. */
     private static final String[] POI_KEYS =
             {"amenity", "shop", "tourism", "leisure", "office"};
@@ -771,13 +868,17 @@ final class PlaceRepository {
      * whatever order it found them.
      */
     private static List<Poi> nearest(List<Poi> all, double lat, double lon) {
-        if (all.size() <= MAX_RESULTS) return all;
+        return nearest(all, lat, lon, MAX_RESULTS);
+    }
+
+    private static List<Poi> nearest(List<Poi> all, double lat, double lon, int keep) {
+        if (all.size() <= keep) return all;
         final double mPerDegLon = Geo.metersPerDegLon(lat);
         for (int i = 0; i < all.size(); i++) {
             all.get(i).relocate(lat, lon, mPerDegLon);
         }
         Collections.sort(all, (a, b) -> Float.compare(a.distM, b.distM));
-        return new ArrayList<>(all.subList(0, MAX_RESULTS));
+        return new ArrayList<>(all.subList(0, keep));
     }
 
     // ------------------------------------------------------------------ HTTP

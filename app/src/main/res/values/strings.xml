@@ -32,7 +32,7 @@
     <!-- 脚注は横幅が足りないので短い綴りを使う -->
     <string name="source_google_short">Google</string>
     <string name="source_osm_short">OSM</string>
-    <string name="none_in_range">範囲内に何もありません</string>
+    <string name="none_in_range">見つかりません。範囲を広げるか、別の言葉で</string>
     <string name="err_google">Google: %1$s</string>
     <string name="err_osm">OSM: %1$s</string>
     <string name="err_busy">地図サーバが混雑しています。少し待ちます</string>
