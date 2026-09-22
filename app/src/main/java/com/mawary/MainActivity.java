@@ -30,27 +30,42 @@ import java.util.List;
  * onPause, so the app costs nothing while it is in the background.
  */
 public final class MainActivity extends Activity
-        implements LocationListener, PlaceRepository.Listener, RadarView.Listener {
+        implements LocationListener, PlaceRepository.Listener, WorldView.Listener {
 
     private static final int REQ_LOCATION = 1;
-    private static final long LOC_MIN_MS = 2000L;
-    private static final float LOC_MIN_M = 5f;
+    // Position feeds distances that are drawn to the nearest metre and searches
+    // that only rerun after a quarter of the range. Asking the radio for a fix
+    // twice a second bought nothing and cost battery.
+    private static final long LOC_MIN_MS = 4000L;
+    private static final float LOC_MIN_M = 12f;
 
     private static final String PREFS = "mawary";
     private static final String KEY_API = "places_api_key";
 
-    private RadarView view;
+    private WorldView view;
     private Heading heading;
     private PlaceRepository places;
     private LocationManager locations;
 
     private boolean tracking;
+    /**
+     * Asking again on every resume turns a single "deny" into a dialog that
+     * reappears every time the app comes back, which looks exactly like the app
+     * having seized up. Ask once per launch and then leave the user alone.
+     */
+    private boolean permissionAsked;
+    /**
+     * The last fix we were handed. Kept here so the tap handler never has to
+     * call into the location service, which is a binder round trip and has no
+     * business on the main thread in the middle of a gesture.
+     */
+    private Location lastFix;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        view = new RadarView(this);
+        view = new WorldView(this);
         view.setListener(this);
         setContentView(view);
 
@@ -60,10 +75,10 @@ public final class MainActivity extends Activity
 
         heading = new Heading(this, (azimuth, tilt, accuracy) -> view.setHeading(azimuth, tilt, accuracy));
         if (!heading.isAvailable()) {
-            view.setStatus("NO COMPASS ON THIS DEVICE");
+            view.setStatus(getString(R.string.no_compass));
         }
 
-        places = new PlaceRepository(apiKey(), this);
+        places = new PlaceRepository(this, apiKey(), this);
         locations = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
     }
 
@@ -78,11 +93,15 @@ public final class MainActivity extends Activity
         super.onResume();
         heading.start();
         if (hasLocationPermission()) {
+            view.setPermissionNeeded(false);
             startTracking();
         } else {
             view.setPermissionNeeded(true);
-            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION},
-                    REQ_LOCATION);
+            if (!permissionAsked) {
+                permissionAsked = true;
+                requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION},
+                        REQ_LOCATION);
+            }
         }
     }
 
@@ -123,7 +142,7 @@ public final class MainActivity extends Activity
             startTracking();
         } else {
             view.setPermissionNeeded(true);
-            view.setStatus("LOCATION DENIED");
+            view.setStatus(getString(R.string.location_denied));
         }
     }
 
@@ -158,7 +177,7 @@ public final class MainActivity extends Activity
             }
             tracking = true;
         } catch (SecurityException e) {
-            view.setStatus("LOCATION DENIED");
+            view.setStatus(getString(R.string.location_denied));
         }
     }
 
@@ -174,6 +193,7 @@ public final class MainActivity extends Activity
 
     @Override
     public void onLocationChanged(Location location) {
+        lastFix = location;
         view.setOrigin(location.getLatitude(), location.getLongitude(),
                 location.hasAccuracy() ? location.getAccuracy() : 0f);
         places.requestAround(location.getLatitude(), location.getLongitude(), view.getRangeM());
@@ -194,7 +214,7 @@ public final class MainActivity extends Activity
     @Override
     public void onPlaces(List<Poi> found, String source) {
         view.setPlaces(found, source);
-        if (found.isEmpty()) view.setStatus("NOTHING FOUND IN RANGE");
+        if (found.isEmpty()) view.setStatus(getString(R.string.none_in_range));
         else view.setStatus("");
     }
 
@@ -208,24 +228,8 @@ public final class MainActivity extends Activity
     @Override
     public void onRangeChanged(int radiusM) {
         places.invalidate();
-        Location last = lastKnown();
-        if (last != null) {
-            places.requestAround(last.getLatitude(), last.getLongitude(), radiusM);
-        }
-    }
-
-    private Location lastKnown() {
-        if (locations == null || !hasLocationPermission()) return null;
-        try {
-            Location best = null;
-            for (String provider : locations.getProviders(true)) {
-                Location l = locations.getLastKnownLocation(provider);
-                if (l == null) continue;
-                if (best == null || l.getTime() > best.getTime()) best = l;
-            }
-            return best;
-        } catch (SecurityException e) {
-            return null;
+        if (lastFix != null) {
+            places.requestAround(lastFix.getLatitude(), lastFix.getLongitude(), radiusM);
         }
     }
 
@@ -247,12 +251,12 @@ public final class MainActivity extends Activity
                     String key = input.getText().toString().trim();
                     prefs.edit().putString(KEY_API, key).apply();
                     places.setApiKey(key.isEmpty() ? BuildConfig.PLACES_API_KEY : key);
-                    Location last = lastKnown();
-                    if (last != null) {
-                        places.requestAround(last.getLatitude(), last.getLongitude(), view.getRangeM());
+                    if (lastFix != null) {
+                        places.requestAround(lastFix.getLatitude(), lastFix.getLongitude(),
+                                view.getRangeM());
                     }
                     Toast.makeText(this,
-                            key.isEmpty() ? R.string.source_osm : R.string.source_google,
+                            key.isEmpty() ? R.string.using_osm : R.string.using_google,
                             Toast.LENGTH_SHORT).show();
                 })
                 .setNegativeButton(android.R.string.cancel, null)

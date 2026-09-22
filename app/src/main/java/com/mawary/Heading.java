@@ -19,8 +19,15 @@ final class Heading implements SensorEventListener {
         void onHeading(float azimuthDeg, float tiltDeg, int accuracy);
     }
 
-    /** Smoothing factor per sample; ~120 ms time constant at the GAME rate. */
-    private static final float ALPHA = 0.15f;
+    /** Smoothing factor per sample; about a 150 ms time constant at our rate. */
+    private static final float ALPHA = 0.22f;
+
+    /**
+     * 30 Hz. The GAME rate delivers 54 Hz on this hardware, which is more
+     * readings than a compass drawn for a human to read can use, and every one
+     * of them wakes the application processor.
+     */
+    private static final int PERIOD_US = 33_000;
 
     private final SensorManager sm;
     private final Sensor rotationVector;
@@ -43,7 +50,16 @@ final class Heading implements SensorEventListener {
     Heading(Context ctx, Listener listener) {
         this.listener = listener;
         sm = (SensorManager) ctx.getSystemService(Context.SENSOR_SERVICE);
-        rotationVector = sm == null ? null : sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
+        // The geomagnetic rotation vector is the same fused orientation without
+        // the gyroscope, which is the part that costs battery. A compass being
+        // read by a walking human does not need the gyro's short-term accuracy,
+        // and this one is smoothed anyway; fall back only if it is missing.
+        Sensor rv = null;
+        if (sm != null) {
+            rv = sm.getDefaultSensor(Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR);
+            if (rv == null) rv = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
+        }
+        rotationVector = rv;
         accelerometer = sm == null ? null : sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         magnetometer = sm == null ? null : sm.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
     }
@@ -55,10 +71,10 @@ final class Heading implements SensorEventListener {
     void start() {
         if (sm == null) return;
         if (rotationVector != null) {
-            sm.registerListener(this, rotationVector, SensorManager.SENSOR_DELAY_GAME);
+            sm.registerListener(this, rotationVector, PERIOD_US);
         } else if (accelerometer != null && magnetometer != null) {
-            sm.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME);
-            sm.registerListener(this, magnetometer, SensorManager.SENSOR_DELAY_UI);
+            sm.registerListener(this, accelerometer, PERIOD_US);
+            sm.registerListener(this, magnetometer, PERIOD_US);
         }
     }
 
@@ -71,6 +87,7 @@ final class Heading implements SensorEventListener {
     @Override
     public void onSensorChanged(SensorEvent event) {
         switch (event.sensor.getType()) {
+            case Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR:
             case Sensor.TYPE_ROTATION_VECTOR:
                 SensorManager.getRotationMatrixFromVector(rotation, event.values);
                 emit();
@@ -120,8 +137,10 @@ final class Heading implements SensorEventListener {
 
     @Override
     public void onAccuracyChanged(Sensor sensor, int acc) {
-        if (sensor.getType() == Sensor.TYPE_ROTATION_VECTOR
-                || sensor.getType() == Sensor.TYPE_MAGNETIC_FIELD) {
+        int type = sensor.getType();
+        if (type == Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR
+                || type == Sensor.TYPE_ROTATION_VECTOR
+                || type == Sensor.TYPE_MAGNETIC_FIELD) {
             accuracy = acc;
         }
     }

@@ -1,5 +1,6 @@
 package com.mawary;
 
+import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -45,14 +46,11 @@ final class PlaceRepository {
 
     private static final String TAG = "mawary";
 
-    static final String SOURCE_GOOGLE = "GOOGLE PLACES";
-    static final String SOURCE_OSM = "OPENSTREETMAP";
-
     private static final long STALE_MS = 120_000L;
     private static final long RETRY_MS = 15_000L;
     private static final int CONNECT_MS = 8_000;
     /** Overpass asks its own backend for up to 20 s, so the read wait has to outlast that. */
-    private static final int READ_MS = 25_000;
+    private static final int READ_MS = 20_000;
     /** How many places the view is given, nearest first. */
     private static final int MAX_RESULTS = 40;
     /**
@@ -87,15 +85,21 @@ final class PlaceRepository {
 
     private final Runnable retry = this::retryLast;
 
+    private final Context ctx;
+    private final String sourceGoogle, sourceOsm;
+
     private String apiKey;
     private volatile boolean inFlight;
     private double lastLat = Double.NaN, lastLon = Double.NaN;
     private int lastRadius;
     private long lastFetchMs;
 
-    PlaceRepository(String apiKey, Listener listener) {
+    PlaceRepository(Context context, String apiKey, Listener listener) {
+        this.ctx = context.getApplicationContext();
         this.apiKey = apiKey == null ? "" : apiKey.trim();
         this.listener = listener;
+        this.sourceGoogle = ctx.getString(R.string.source_google);
+        this.sourceOsm = ctx.getString(R.string.source_osm);
     }
 
     void setApiKey(String key) {
@@ -159,10 +163,10 @@ final class PlaceRepository {
             if (!apiKey.isEmpty()) {
                 try {
                     result = fetchGooglePlaces(lat, lon, radiusM);
-                    source = SOURCE_GOOGLE;
+                    source = sourceGoogle;
                 } catch (Exception e) {
                     Log.w(TAG, "google places failed", e);
-                    status = "Places: " + shortMessage(e);
+                    status = ctx.getString(R.string.err_google, shortMessage(e));
                 }
             }
             if (result == null || result.isEmpty()) {
@@ -170,11 +174,11 @@ final class PlaceRepository {
                     List<Poi> osm = fetchOverpass(lat, lon, radiusM);
                     if (!osm.isEmpty() || result == null) {
                         result = osm;
-                        source = SOURCE_OSM;
+                        source = sourceOsm;
                     }
                 } catch (Exception e) {
                     Log.w(TAG, "overpass failed", e);
-                    if (status == null) status = "OSM: " + shortMessage(e);
+                    if (status == null) status = ctx.getString(R.string.err_osm, shortMessage(e));
                 }
             }
             final List<Poi> out = result;
@@ -251,7 +255,12 @@ final class PlaceRepository {
 
     private List<Poi> fetchOverpass(double lat, double lon, int radiusM) throws Exception {
         Exception last = null;
-        for (String endpoint : OVERPASS) {
+        for (int i = 0; i < OVERPASS.length; i++) {
+            String endpoint = OVERPASS[i];
+            // Say which mirror we are on. Three of them, each allowed 20 s,
+            // is a long time to leave the screen saying nothing at all.
+            final String note = ctx.getString(R.string.searching_fmt, i + 1, OVERPASS.length);
+            main.post(() -> listener.onStatus(note));
             try {
                 return fetchOverpass(endpoint, lat, lon, radiusM);
             } catch (Exception e) {

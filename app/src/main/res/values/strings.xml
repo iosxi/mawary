@@ -1,9 +1,42 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  多言語対応はまだ考えていないので、既定のこのファイルを日本語そのものとして扱う。
+  values-ja/ を分けていないのは、分けた瞬間に英語版の面倒を見る必要が出るため。
+-->
 <resources>
     <string name="app_name">mawary</string>
 
+    <!-- 画面上部 -->
+    <string name="range_fmt">範囲 %1$s</string>
+    <string name="source_scanning">探索中</string>
+    <string name="fix_none">測位なし</string>
+    <string name="fix_fmt">測位 ±%1$dm</string>
+    <string name="fix_ok">測位 OK</string>
+
+    <!-- 視界の中央に出る状態表示 -->
+    <string name="need_permission">位置情報の許可が必要です</string>
+    <string name="acquiring">現在地を取得しています…</string>
+    <string name="searching">探しています…</string>
+    <string name="searching_fmt">探しています… %1$d/%2$d</string>
+
+    <!-- 一覧と脚注 -->
+    <string name="nothing_ahead">正面には何もありません。体を回してください</string>
+    <string name="stand_by">準備中</string>
+    <string name="calibrate">方位が未校正です。8 の字に振ってください</string>
+    <string name="hint">右の目盛り: 範囲　長押し: API キー</string>
+
+    <!-- 取得結果 -->
+    <string name="source_google">Google マップ</string>
+    <string name="source_osm">OpenStreetMap</string>
+    <string name="none_in_range">範囲内に何もありません</string>
+    <string name="err_google">Google: %1$s</string>
+    <string name="err_osm">OSM: %1$s</string>
+    <string name="no_compass">この端末には方位センサがありません</string>
+    <string name="location_denied">位置情報が許可されていません</string>
+
+    <!-- API キーの入力 -->
     <string name="api_key_title">Google Places API キー</string>
-    <string name="api_key_message">キーを入れると Google マップの検索結果を表示します。空のままなら OpenStreetMap を使います。</string>
-    <string name="source_google">Google Places を使います</string>
-    <string name="source_osm">OpenStreetMap を使います</string>
+    <string name="api_key_message">キーを入れると Google マップの検索結果を表示します。空のままなら OpenStreetMap を使います（キーは無くても使えます）。</string>
+    <string name="using_google">Google マップを使います</string>
+    <string name="using_osm">OpenStreetMap を使います</string>
 </resources>

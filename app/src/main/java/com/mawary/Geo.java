@@ -30,9 +30,12 @@ final class Geo {
         return d;
     }
 
+    /** 16 方位。多言語対応は未検討なので、表示に使う綴りをそのまま持つ。 */
     static final String[] CARDINAL_16 = {
-            "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
-            "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"
+            "北", "北北東", "北東", "東北東",
+            "東", "東南東", "南東", "南南東",
+            "南", "南南西", "南西", "西南西",
+            "西", "西北西", "北西", "北北西"
     };
 
     static String cardinal(float azimuthDeg) {

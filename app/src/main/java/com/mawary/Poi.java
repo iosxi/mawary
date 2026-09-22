@@ -18,6 +18,12 @@ final class Poi {
     float bearingDeg;
     /** Pre-formatted "84m" / "1.2km" so onDraw() never allocates. */
     String distLabel = "";
+    /** Name trimmed to the width it is drawn at, out in the field. */
+    String fieldLabel = "";
+    /** Name trimmed to the width it is drawn at, in the list. */
+    String listLabel = "";
+    /** Type size the list row needs so this name fits without being cut. */
+    float listSize;
 
     Poi(String name, String kind, double lat, double lon) {
         this.name = name;
