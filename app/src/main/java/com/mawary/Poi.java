@@ -27,6 +27,15 @@ final class Poi {
     String listLabel = "";
     /** Type size the list row needs so this name fits without being cut. */
     float listSize;
+    /** Drawn widths of fieldLabel and distLabel, measured with the data, not per frame. */
+    float nameW, distW;
+    /** Where the stake's foot landed this frame. Only meaningful while it is in view. */
+    float sx, sy;
+    /**
+     * The spot the label took last frame, or -1. Kept so a label stays put as
+     * the view turns, instead of hopping between equally good spots.
+     */
+    int labelSpot = -1;
 
     Poi(String name, String kind, double lat, double lon) {
         this(name, "", kind, lat, lon);

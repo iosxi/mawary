@@ -58,15 +58,36 @@ final class WorldView extends View {
 
     /** Half-width of the field of view. The screen spans exactly this each way. */
     private static final float SPAN = 90f;
-    /** Half-angle of the band counted as "dead ahead". */
-    private static final float AIM = 25f;
 
     /** Fractions of the range that get a labelled ground band. */
     private static final float[] BANDS = {0.03f, 0.1f, 0.25f, 0.5f, 1f};
     /** How hard the ground curves away at the edges of the view. */
     private static final float BOW = 0.25f;
 
-    private static final int MAX_FIELD_LABELS = 3;
+    /**
+     * Every stake in view gets a name, up to this many; the nearest win. A
+     * search can bring back 180 places, and past a few dozen names the field
+     * is solid text anyway, so this also bounds what a frame has to place.
+     */
+    private static final int MAX_FIELD_LABELS = 30;
+
+    /**
+     * The eight spots a label can take around its stake, in order of
+     * preference: the direction it sits in, and which point of the label the
+     * leader line meets (0 = left / top edge, 0.5 = middle, 1 = right / bottom).
+     * Above comes first because above is further away, and it is the ground
+     * nearer than the stake that the label would otherwise hide.
+     */
+    private static final float D = 0.7071f;
+    private static final float[] SPOT_DX = {0, D, -D, 1, -1, D, -D, 0};
+    private static final float[] SPOT_DY = {-1, -D, -D, 0, 0, D, D, 1};
+    private static final float[] SPOT_AX = {0.5f, 0, 1, 0, 1, 0, 1, 0.5f};
+    private static final float[] SPOT_AY = {1, 1, 1, 0.5f, 0.5f, 0, 0, 0};
+    /** How far out along each direction a label may sit, in dp: near first. */
+    private static final float[] LEADS = {16, 38, 66, 104, 150};
+
+    /** Label backgrounds are the night sky, dimmed: what is behind still shows. */
+    private static final int COL_LABEL_BG = 0xB805080A;
     /** Deliberately not a whole number: a half row showing is what says "scroll me". */
     private static final float LIST_ROWS = 3.5f;
 
@@ -101,11 +122,21 @@ final class WorldView extends View {
     private final Paint pDist = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pSmall = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pTiny = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pLabelBg = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pLeader = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final Path path = new Path();
-    /** Label baselines already taken this frame, so names cannot pile up. */
-    private final float[] labelSlots = new float[MAX_FIELD_LABELS];
-    private int labelSlotCount;
+    /**
+     * Labels placed this frame, nearest first: left, top, right, bottom, then
+     * where the leader meets it. Filled before anything is drawn, so every
+     * label can be kept off the ones already placed.
+     */
+    private final float[] labelBox = new float[MAX_FIELD_LABELS * 4];
+    private final float[] labelEnd = new float[MAX_FIELD_LABELS * 2];
+    private final Poi[] labelPoi = new Poi[MAX_FIELD_LABELS];
+    private int labelCount;
+    /** Font metrics for the two lines of a label, read once. */
+    private float nameAsc, nameDesc, distAsc, distDesc;
     private final RectF oval = new RectF();
     private final GestureDetector gestures;
     private Listener listener;
@@ -189,6 +220,14 @@ final class WorldView extends View {
         text(pName, COL_TARGET, 20f, mono);
         text(pSmall, COL_DIM, 16f, mono);
         text(pTiny, COL_DIM, 13f, mono);
+        nameAsc = -pName.ascent();
+        nameDesc = pName.descent();
+        distAsc = -pSmall.ascent();
+        distDesc = pSmall.descent();
+
+        pLabelBg.setStyle(Paint.Style.FILL);
+        pLabelBg.setColor(COL_LABEL_BG);
+        stroke(pLeader, COL_TARGET, 1.2f);
 
         sScanning = ctx.getString(R.string.source_scanning);
         sNeedPermission = ctx.getString(R.string.need_permission);
@@ -344,11 +383,15 @@ final class WorldView extends View {
     /** Trims names to the widths they will be drawn at, once, not once a frame. */
     private void prepareLabels() {
         if (getWidth() == 0) return;
-        float fieldW = halfSpanPx * 1.15f;
+        // Narrower than it once was: names now sit beside their stakes, and a
+        // label half the field wide leaves nowhere for the next one to go.
+        float fieldW = halfSpanPx * 0.8f;
         float listW = getWidth() - 2 * pad - 30 * dp - pDist.measureText("8888m") - 12 * dp;
         for (int i = 0; i < places.size(); i++) {
             Poi p = places.get(i);
             p.fieldLabel = ellipsise(p.name, pName, fieldW);
+            p.nameW = pName.measureText(p.fieldLabel);
+            p.distW = pSmall.measureText(p.distLabel);
 
             // Shop names carry the branch on the end, so cutting the tail off
             // loses the part that tells two of them apart. Shrink the row until
@@ -663,9 +706,7 @@ final class WorldView extends View {
             }
         }
 
-        // The band we count as dead ahead, and the aim line down the middle.
-        aimEdge(canvas, -AIM, horizonY);
-        aimEdge(canvas, AIM, horizonY);
+        // The aim line down the middle.
         canvas.drawLine(cx, groundY(1f, 0f, horizonY), cx, fieldBottom, pGrid);
     }
 
@@ -679,12 +720,6 @@ final class WorldView extends View {
             else path.lineTo(x, y);
         }
         canvas.drawPath(path, paint);
-    }
-
-    /** One side of the aim band, following the ground from the horizon to our feet. */
-    private void aimEdge(Canvas canvas, float rel, float horizonY) {
-        float x = screenX(rel);
-        canvas.drawLine(x, groundY(1f, rel, horizonY), x, groundY(0f, rel, horizonY), pGrid);
     }
 
     private void drawPlaces(Canvas canvas, float horizonY) {
@@ -703,77 +738,148 @@ final class WorldView extends View {
         }
 
         int range = getRangeM();
-        labelSlotCount = 0;
+        final float stem = 16 * dp;
         for (int i = 0; i < places.size(); i++) {
             Poi p = places.get(i);
             if (p.distM > range) continue;
             float rel = Geo.delta180(p.bearingDeg, headingDeg);
             if (Math.abs(rel) > SPAN) continue;          // behind us: not our business
 
-            boolean onAim = Math.abs(rel) <= AIM;
-            // The list holds the whole half-circle, nearest first, so that
-            // scrolling it is worth doing; the aimed ones are simply lit up.
+            // Anything on screen is lit: being in view is being found.
             ahead.add(p);
 
             float u = (float) Math.sqrt(p.distM / range);
             float x = screenX(rel), y = groundY(u, rel, horizonY);
+            p.sx = x;
+            p.sy = y;
 
             // A stake in the ground: the foot is where the thing is.
-            float stem = (onAim ? 16 : 9) * dp;
-            Paint paint = onAim ? pTarget : pGrid;
-            canvas.drawLine(x, y, x, y - stem, paint);
-            diamond(canvas, x, y - stem - 5 * dp, (onAim ? 7f : 4.5f) * dp, paint);
-
+            canvas.drawLine(x, y, x, y - stem, pTarget);
+            diamond(canvas, x, y - stem - 5 * dp, 7f * dp, pTarget);
         }
 
-        // Names last, so a neighbouring stake cannot be drawn over them, and
-        // only for what is dead ahead: the rest would be a thicket.
-        int labels = 0;
-        for (int i = 0; i < ahead.size() && labels < MAX_FIELD_LABELS; i++) {
-            Poi p = ahead.get(i);
-            float rel = Geo.delta180(p.bearingDeg, headingDeg);
-            if (Math.abs(rel) > AIM) continue;
-            float u = (float) Math.sqrt(p.distM / range);
-            float x = screenX(rel), y = groundY(u, rel, horizonY);
-            drawFieldLabel(canvas, p, x, y - 42 * dp, y - 25 * dp);
-            labels++;
+        // Places nearest first, so the nearest get the clear spots; draws
+        // furthest first, so where it cannot be helped the nearest end up on top.
+        labelCount = 0;
+        for (int i = 0; i < ahead.size() && labelCount < MAX_FIELD_LABELS; i++) {
+            placeLabel(ahead.get(i), stem);
+        }
+        for (int i = labelCount - 1; i >= 0; i--) {
+            drawLabel(canvas, i, stem);
         }
     }
 
     /**
-     * A name above its stake. Two places on much the same bearing land on top of
-     * one another, so a name claims a line and later ones are lifted clear of
-     * the lines already taken, with a leader back to the stake they belong to.
+     * Finds the least crowded of the spots around a stake and takes it.
+     *
+     * <p>Every spot is scored rather than the first clear one taken, because
+     * when the field is full there is no clear one, and the least bad is still
+     * worth having. The score is the area the label would hide — of labels
+     * already placed, of stakes, of the compass, of the edge of the screen —
+     * plus a little for a long leader and a little for moving off last frame's
+     * spot, so a label does not flicker between two equally good places.
      */
-    private void drawFieldLabel(Canvas canvas, Poi p, float x, float ty, float stakeTop) {
-        final float slotH = 48 * dp;
-        // Bounded on purpose: nothing inside onDraw() gets to loop on a
-        // condition. One pass per taken slot is provably enough, and the cap
-        // means a surprise cannot turn a frame into a spin on the UI thread.
-        for (int guard = 0; guard <= labelSlots.length; guard++) {
-            boolean moved = false;
-            for (int i = 0; i < labelSlotCount; i++) {
-                if (Math.abs(ty - labelSlots[i]) < slotH) {
-                    ty = labelSlots[i] - slotH;
-                    moved = true;
-                }
-            }
-            if (!moved) break;
-        }
-        if (labelSlotCount < labelSlots.length) labelSlots[labelSlotCount++] = ty;
+    private void placeLabel(Poi p, float stem) {
+        final float padX = 6 * dp, padY = 3 * dp;
+        float w = Math.max(p.nameW, p.distW) + 2 * padX;
+        float h = padY + nameAsc + nameDesc + distAsc + distDesc + padY;
+        float px = p.sx, py = p.sy - stem - 5 * dp;
 
-        // Name and distance travel together, so the pair never lands on a
-        // neighbour's name.
-        if (stakeTop - (ty + 20 * dp) > 8 * dp) {
-            canvas.drawLine(x, stakeTop, x, ty + 24 * dp, pGrid);
+        float minX = pad * 0.5f, maxX = cx + halfSpanPx + 8 * dp;
+        float rangeY = sliderY(rangeIndex);
+        float rangeLeft = sliderX - 15 * dp - pSmall.measureText(rangeShort);
+        float minY = fieldTop, maxY = listTop - 12 * dp;
+        float area = w * h;
+
+        int best = 0;
+        float bestCost = Float.MAX_VALUE;
+        int spots = SPOT_DX.length * LEADS.length;
+        for (int s = 0; s < spots; s++) {
+            int dir = s % SPOT_DX.length, lead = s / SPOT_DX.length;
+            float l = LEADS[lead] * dp;
+            float left = px + SPOT_DX[dir] * l - SPOT_AX[dir] * w;
+            float top = py + SPOT_DY[dir] * l - SPOT_AY[dir] * h;
+            float right = left + w, bottom = top + h;
+
+            float cost = 8f * (area - overlap(left, top, right, bottom, minX, minY, maxX, maxY));
+            for (int k = 0; k < labelCount; k++) {
+                cost += 6f * overlap(left, top, right, bottom,
+                        labelBox[k * 4], labelBox[k * 4 + 1],
+                        labelBox[k * 4 + 2], labelBox[k * 4 + 3]);
+            }
+            if (cost >= bestCost) continue;
+            for (int k = 0; k < ahead.size(); k++) {
+                Poi q = ahead.get(k);
+                cost += 2f * overlap(left, top, right, bottom,
+                        q.sx - 8 * dp, q.sy - stem - 13 * dp, q.sx + 8 * dp, q.sy);
+            }
+            cost += 2f * overlap(left, top, right, bottom, cx - compassRx, compassCy - compassRx,
+                    cx + compassRx, compassCy + compassRx + compassThick);
+            // The range readout on the slider is the one number you set by
+            // hand, so it is kept as clear as a placed label.
+            cost += 4f * overlap(left, top, right, bottom, rangeLeft, rangeY - 14 * dp,
+                    sliderX + 11 * dp, rangeY + 12 * dp);
+            cost += l * h * 0.25f + dir * 12 * dp * dp;
+            if (s != p.labelSpot) cost += area * 0.15f;
+            if (cost < bestCost) {
+                bestCost = cost;
+                best = s;
+            }
         }
+        p.labelSpot = best;
+
+        int dir = best % SPOT_DX.length;
+        float l = LEADS[best / SPOT_DX.length] * dp;
+        float left = px + SPOT_DX[dir] * l - SPOT_AX[dir] * w;
+        float top = py + SPOT_DY[dir] * l - SPOT_AY[dir] * h;
+        // Nowhere was wholly on screen: pull it in, and the leader follows.
+        if (left + w > maxX) left = maxX - w;
+        if (left < minX) left = minX;
+        if (top + h > maxY) top = maxY - h;
+        if (top < minY) top = minY;
+
+        int n = labelCount++;
+        labelPoi[n] = p;
+        labelBox[n * 4] = left;
+        labelBox[n * 4 + 1] = top;
+        labelBox[n * 4 + 2] = left + w;
+        labelBox[n * 4 + 3] = top + h;
+        labelEnd[n * 2] = left + SPOT_AX[dir] * w;
+        labelEnd[n * 2 + 1] = top + SPOT_AY[dir] * h;
+    }
+
+    /** Area two rectangles share. */
+    private static float overlap(float l1, float t1, float r1, float b1,
+                                 float l2, float t2, float r2, float b2) {
+        float w = Math.min(r1, r2) - Math.max(l1, l2);
+        float h = Math.min(b1, b2) - Math.max(t1, t2);
+        return w > 0 && h > 0 ? w * h : 0f;
+    }
+
+    /**
+     * One label as placed: a leader from the middle of the stake's head to the
+     * label, then the label itself, name over distance on a see-through ground.
+     */
+    private void drawLabel(Canvas canvas, int n, float stem) {
+        Poi p = labelPoi[n];
+        float left = labelBox[n * 4], top = labelBox[n * 4 + 1];
+        float right = labelBox[n * 4 + 2], bottom = labelBox[n * 4 + 3];
+        float mid = (left + right) / 2f;
+
+        canvas.drawLine(p.sx, p.sy - stem - 5 * dp, labelEnd[n * 2], labelEnd[n * 2 + 1], pLeader);
+
+        oval.set(left, top, right, bottom);
+        canvas.drawRoundRect(oval, 4 * dp, 4 * dp, pLabelBg);
+        canvas.drawRoundRect(oval, 4 * dp, 4 * dp, pGrid);
+
+        float nameBase = top + 3 * dp + nameAsc;
         pName.setTextAlign(Paint.Align.CENTER);
-        canvas.drawText(p.fieldLabel, x, ty, pName);
+        canvas.drawText(p.fieldLabel, mid, nameBase, pName);
         pName.setTextAlign(Paint.Align.LEFT);
 
         pSmall.setTextAlign(Paint.Align.CENTER);
         pSmall.setColor(COL_DIM);
-        canvas.drawText(p.distLabel, x, ty + 19 * dp, pSmall);
+        canvas.drawText(p.distLabel, mid, nameBase + nameDesc + distAsc, pSmall);
         pSmall.setTextAlign(Paint.Align.LEFT);
     }
 
@@ -893,17 +999,17 @@ final class WorldView extends View {
                 float y = top + 20 * dp + i * rowH - listScroll;
 
                 float rel = Geo.delta180(p.bearingDeg, headingDeg);
-                boolean onAim = Math.abs(rel) <= AIM;
                 String arrow = rel < -3f ? "<" : (rel > 3f ? ">" : "|");
 
-                pDist.setColor(onAim ? COL_TARGET : COL_DIM);
+                // Everything listed is in view, so everything is lit.
+                pDist.setColor(COL_TARGET);
                 canvas.drawText(arrow, pad, y, pDist);
 
                 pList.setTextSize(p.listSize);
-                pList.setColor(onAim ? COL_TEXT : COL_DIM);
+                pList.setColor(COL_TEXT);
                 canvas.drawText(p.listLabel, pad + 24 * dp, y, pList);
 
-                pDist.setColor(onAim ? COL_TARGET : COL_DIM);
+                pDist.setColor(COL_TARGET);
                 pDist.setTextAlign(Paint.Align.RIGHT);
                 canvas.drawText(p.distLabel, w - pad - 8 * dp, y, pDist);
                 pDist.setTextAlign(Paint.Align.LEFT);
