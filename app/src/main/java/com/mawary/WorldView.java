@@ -220,7 +220,11 @@ final class WorldView extends View {
     private float halfSpanPx;
     private float compassRx, compassThick, compassCy;
     private float listTop, rowH;
-    private float sliderX, sliderTop, sliderBottom, sliderHit;
+    /** The range slider: the track's centre line, its ends, and where a finger counts. */
+    private float sliderX, sliderTop, sliderBottom;
+    private final RectF sliderHit = new RectF();
+    /** Everything the slider draws, readout included, for labels to keep off. */
+    private final RectF sliderArea = new RectF();
     /** The two buttons, top right: search, then settings to its right. */
     private final RectF searchBtn = new RectF(), settingsBtn = new RectF();
     private int insetTop, insetBottom;
@@ -436,14 +440,14 @@ final class WorldView extends View {
     }
 
     /**
-     * The buttons, the slider down the right-hand edge and the list each own
+     * The buttons, the range slider and the list each own
      * their patch; a tap anywhere else is deliberately unclaimed.
      */
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         int action = event.getActionMasked();
-        // The buttons sit above the slider and inside its column, so they are
-        // asked first, and the slider only answers for its own height.
+        // The buttons are asked first; the slider answers only inside its own
+        // patch, which is kept generous for a thumb.
         if (action == MotionEvent.ACTION_DOWN) {
             int hit = buttonAt(event.getX(), event.getY());
             if (hit != BTN_NONE) {
@@ -452,9 +456,7 @@ final class WorldView extends View {
                 return true;
             }
         }
-        if (action == MotionEvent.ACTION_DOWN && event.getX() >= sliderHit
-                && event.getY() >= sliderTop - 24 * dp
-                && event.getY() <= sliderBottom + 24 * dp) {
+        if (action == MotionEvent.ACTION_DOWN && sliderHit.contains(event.getX(), event.getY())) {
             sliding = true;
             slideStartIndex = rangeIndex;
             getParent().requestDisallowInterceptTouchEvent(true);
@@ -566,13 +568,13 @@ final class WorldView extends View {
     private void layoutGeometry(int w, int h) {
         if (w == 0 || h == 0) return;
         pad = 16 * dp;
-        // The slider takes a strip off the right, so the field is centred in
-        // what is left: the half-circle has to stay symmetric about dead ahead.
-        float sliderStrip = 30 * dp;
-        cx = (w - sliderStrip) / 2f;
+        // The slider no longer runs the height of the screen, so the field
+        // takes the whole width, centred: the half-circle has to stay
+        // symmetric about dead ahead.
+        cx = w / 2f;
         halfSpanPx = cx - pad;
-        sliderX = w - pad - 7 * dp;
-        sliderHit = w - sliderStrip - 26 * dp;
+        // In from the edge a little, where a right thumb rests.
+        sliderX = w - pad - 22 * dp;
 
         // Buttons at the size a thumb can hit without looking: 48dp square,
         // 8dp apart, off the edge by the same margin as everything else.
@@ -599,8 +601,12 @@ final class WorldView extends View {
         fieldBottom = compassCy;
         horizonBase = fieldTop + (fieldBottom - fieldTop) * 0.19f;
 
-        sliderTop = fieldTop + 26 * dp;
-        sliderBottom = fieldBottom - 10 * dp;
+        // Low and short: down beside the compass, where the ground is nearest
+        // and least is ever drawn, ending just above the list.
+        sliderBottom = listTop - 44 * dp;
+        sliderTop = Math.max(fieldTop + 40 * dp, sliderBottom - 190 * dp);
+        sliderHit.set(sliderX - 34 * dp, sliderTop - 22 * dp,
+                w - pad * 0.5f, sliderBottom + 16 * dp);
 
         prepareLabels();
     }
@@ -718,28 +724,51 @@ final class WorldView extends View {
         pTiny.setColor(COL_DIM);
     }
 
-    /** The range control: a detent per step, far at the top to match the view. */
+    /**
+     * The range control, drawn as a scroll bar so it reads as something to
+     * drag: a rounded track with a dot at each step, and a thumb that sits on
+     * the chosen one, gripped across the middle. Far is at the top, to match
+     * the view, and the two ends are labelled so which way is which is never
+     * a guess. The chosen range is written beside the thumb on a card of its
+     * own, since the field shows through everywhere else.
+     */
     private void drawSlider(Canvas canvas) {
-        canvas.drawLine(sliderX, sliderTop, sliderX, sliderBottom, pGrid);
+        float half = 6 * dp;
+        oval.set(sliderX - half, sliderTop - half * 2, sliderX + half, sliderBottom + half * 2);
+        canvas.drawRoundRect(oval, half, half, pNotice);
+        canvas.drawRoundRect(oval, half, half, pBubble);
+        pButton.setColor(COL_MID);
         for (int i = 0; i < RANGES.length; i++) {
-            float y = sliderY(i);
-            boolean on = i == rangeIndex;
-            canvas.drawLine(sliderX - (on ? 11 : 7) * dp, y,
-                    sliderX + (on ? 11 : 7) * dp, y, on ? pTarget : pRing);
+            canvas.drawCircle(sliderX, sliderY(i), 1.8f * dp, pButton);
         }
 
         float y = sliderY(rangeIndex);
-        path.rewind();
-        path.moveTo(sliderX - 9 * dp, y - 10 * dp);
-        path.lineTo(sliderX + 9 * dp, y - 10 * dp);
-        path.lineTo(sliderX + 9 * dp, y + 10 * dp);
-        path.lineTo(sliderX - 9 * dp, y + 10 * dp);
-        path.close();
-        canvas.drawPath(path, pTarget);
+        float tw = 11 * dp, th = 18 * dp;
+        oval.set(sliderX - tw, y - th, sliderX + tw, y + th);
+        pButton.setColor(sliding ? COL_TEXT : COL_TARGET);
+        canvas.drawRoundRect(oval, tw, tw, pButton);
+        pButton.setColor(COL_BUTTON);
+        for (int g = -1; g <= 1; g++) {
+            canvas.drawRect(sliderX - 5 * dp, y + g * 4.5f * dp - 0.8f * dp,
+                    sliderX + 5 * dp, y + g * 4.5f * dp + 0.8f * dp, pButton);
+        }
 
+        // Which end is which.
+        pTiny.setTextAlign(Paint.Align.CENTER);
+        pTiny.setColor(COL_DIM);
+        canvas.drawText(Poi.format(RANGES[RANGES.length - 1]), sliderX, sliderTop - 20 * dp, pTiny);
+        canvas.drawText(Poi.format(RANGES[0]), sliderX, sliderBottom + 26 * dp, pTiny);
+        pTiny.setTextAlign(Paint.Align.LEFT);
+
+        // The chosen range, beside the thumb.
+        float textW = pSmall.measureText(rangeShort);
+        float right = sliderX - tw - 8 * dp;
+        oval.set(right - textW - 16 * dp, y - 14 * dp, right, y + 14 * dp);
+        canvas.drawRoundRect(oval, 14 * dp, 14 * dp, pNotice);
+        canvas.drawRoundRect(oval, 14 * dp, 14 * dp, pBubble);
         pSmall.setTextAlign(Paint.Align.RIGHT);
         pSmall.setColor(COL_TARGET);
-        canvas.drawText(rangeShort, sliderX - 15 * dp, y + 6 * dp, pSmall);
+        canvas.drawText(rangeShort, right - 8 * dp, y + 6 * dp, pSmall);
         pSmall.setColor(COL_DIM);
         pSmall.setTextAlign(Paint.Align.LEFT);
     }
@@ -901,8 +930,10 @@ final class WorldView extends View {
         labelCount = n;
         final float padX = 6 * dp, padY = 3 * dp;
         float h = padY + nameAsc + nameDesc + distAsc + distDesc + padY;
-        float rangeY = sliderY(rangeIndex);
-        float rangeLeft = sliderX - 15 * dp - pSmall.measureText(rangeShort);
+        // The slider, its end labels and the readout at whatever step it is
+        // on, widened to where the readout could be.
+        sliderArea.set(sliderX - 11 * dp - 8 * dp - pSmall.measureText("10.0km") - 16 * dp,
+                sliderTop - 34 * dp, sliderX + 12 * dp, sliderBottom + 30 * dp);
 
         for (int i = 0; i < n; i++) {
             Poi p = ahead.get(i);
@@ -920,10 +951,10 @@ final class WorldView extends View {
                 }
                 cost += overlap(cL, cT, cR, cB, cx - compassRx, compassCy - compassRx,
                         cx + compassRx, compassCy + compassRx + compassThick);
-                // The range readout on the slider is the one number you set
-                // by hand, so a label all but never sits on it.
-                cost += 30f * overlap(cL, cT, cR, cB, rangeLeft, rangeY - 14 * dp,
-                        sliderX + 11 * dp, rangeY + 12 * dp);
+                // The slider is the one control out in the field, so a label
+                // all but never sits on it.
+                cost += 30f * overlap(cL, cT, cR, cB, sliderArea.left, sliderArea.top,
+                        sliderArea.right, sliderArea.bottom);
                 // Measured after the label is pulled onto the screen, so a
                 // spot off the edge is charged for the leader it really gets.
                 cost += (float) Math.hypot(cEx - px, cEy - py) * h * LEAD_WEIGHT;

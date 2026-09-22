@@ -402,19 +402,23 @@ final class PlaceRepository {
         String key = cacheKey(lat, lon, radiusM);
         Cached hit = cache.get(key);
         if (hit != null && System.currentTimeMillis() - hit.at < CACHE_TTL_MS) {
-            if (key.equals(deliveredKey)) return;   // already on screen
             // Supersede anything still in the air: it is answering an older
-            // question than the one we are about to satisfy from memory.
+            // question than the one we are about to satisfy from memory. This
+            // comes before the "already on screen" check, because what is on
+            // screen is exactly what a late answer would overwrite: flick the
+            // range 5 km → 100 m → 5 km inside a second and the 100 m answer
+            // used to land after, under a slider reading 5 km.
             generation.incrementAndGet();
             pending = false;
             main.removeCallbacks(retry);
+            setBusy(false);
+            if (key.equals(deliveredKey)) return;   // already on screen
             lastLat = lat;
             lastLon = lon;
             lastRadius = radiusM;
             lastFetchMs = hit.at;
             Log.i(TAG, "requestAround: answered from cache, " + hit.places.size() + " held");
             deliveredKey = key;
-            setBusy(false);
             listener.onStatus("");
             listener.onPlaces(nearest(hit.places, lat, lon), hit.source);
             return;
