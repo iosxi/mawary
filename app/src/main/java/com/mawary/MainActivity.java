@@ -44,6 +44,7 @@ public final class MainActivity extends Activity
     static final String PREFS = "mawary";
     static final String KEY_API = "places_api_key";
     static final String KEY_LABEL_TRANSPARENCY = "label_transparency";
+    static final String KEY_TILT_RANGE = "tilt_range";
 
     private WorldView view;
     private Heading heading;
@@ -75,6 +76,7 @@ public final class MainActivity extends Activity
         view = new WorldView(this);
         view.setListener(this);
         view.setLabelTransparency(labelTransparency());
+        view.setTiltRange(tiltRange());
         setContentView(view);
 
         // After setContentView: the insets controller hangs off the decor view,
@@ -100,6 +102,10 @@ public final class MainActivity extends Activity
     private int labelTransparency() {
         return getSharedPreferences(PREFS, MODE_PRIVATE)
                 .getInt(KEY_LABEL_TRANSPARENCY, WorldView.DEFAULT_LABEL_TRANSPARENCY);
+    }
+
+    private boolean tiltRange() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_TILT_RANGE, true);
     }
 
     @Override
@@ -333,6 +339,7 @@ public final class MainActivity extends Activity
      */
     private void applySettings() {
         view.setLabelTransparency(labelTransparency());
+        view.setTiltRange(tiltRange());
         String stored = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_API, "");
         if (stored.equals(appliedKey)) return;
         appliedKey = stored;

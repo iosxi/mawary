@@ -23,6 +23,7 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
+import android.widget.Switch;
 import android.widget.TextView;
 
 /**
@@ -80,6 +81,9 @@ public final class SettingsActivity extends Activity {
         body.addView(sectionTitle(R.string.section_display));
         body.addView(transparencyCard());
         body.addView(sectionTitle(R.string.section_search));
+        body.addView(tiltRangeCard());
+        View gap = new View(this);
+        body.addView(gap, new LinearLayout.LayoutParams(1, px(12)));
         body.addView(apiKeyCard());
         scroll.addView(body);
         root.addView(scroll, new LinearLayout.LayoutParams(
@@ -185,6 +189,33 @@ public final class SettingsActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, px(96));
         lp.topMargin = px(4);
         card.addView(preview, lp);
+        return card;
+    }
+
+    /** The tilt-driven range: a switch, saved the moment it is flipped. */
+    private View tiltRangeCard() {
+        LinearLayout card = card();
+
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.addView(itemTitle(R.string.tilt_range_title),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Switch sw = new Switch(this);
+        sw.setChecked(prefs.getBoolean(MainActivity.KEY_TILT_RANGE, true));
+        int[][] states = {{android.R.attr.state_checked}, {}};
+        sw.setThumbTintList(new ColorStateList(states,
+                new int[]{WorldView.COL_TARGET, WorldView.COL_DIM}));
+        sw.setTrackTintList(new ColorStateList(states,
+                new int[]{WorldView.COL_TARGET, WorldView.COL_GRID}));
+        sw.setOnCheckedChangeListener((b, on) ->
+                prefs.edit().putBoolean(MainActivity.KEY_TILT_RANGE, on).apply());
+        sw.setContentDescription(getString(R.string.tilt_range_title));
+        top.addView(sw);
+        card.addView(top);
+        card.addView(itemNote(R.string.tilt_range_message));
+        // The whole card toggles, not just the small switch.
+        card.setOnClickListener(v -> sw.toggle());
         return card;
     }
 

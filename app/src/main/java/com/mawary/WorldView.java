@@ -3,9 +3,11 @@ package com.mawary;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Insets;
+import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
+import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.hardware.SensorManager;
 import android.os.Build;
@@ -109,6 +111,38 @@ final class WorldView extends View {
     private static final float HEADING_EPS = 0.4f;
     private static final float TILT_EPS = 0.8f;
 
+    /**
+     * The tilt-driven range. Held upright (the back facing the horizon) is the
+     * far end, laid flat is the near end, and the steps are spread evenly in
+     * between. Each end gets a few degrees to itself, since nobody holds a
+     * phone at exactly 0° or 90°.
+     */
+    private static final float TILT_FAR_DEG = 10f;
+    private static final float TILT_NEAR_DEG = 80f;
+    /**
+     * How far past the halfway mark between two steps the tilt has to go
+     * before the range moves, in steps. Without it a hand resting on a
+     * boundary flickers between the two.
+     */
+    private static final float TILT_HYSTERESIS = 0.2f;
+    /**
+     * The search waits for the tilt to settle this long. Tipping the phone
+     * from flat to upright crosses every step on the way, and each one would
+     * otherwise send a search.
+     */
+    private static final long TILT_SETTLE_MS = 700L;
+    private static final int COL_SLIDER_OFF = 0xFF6F7F80;
+
+    /**
+     * The horizon glow: a soft grey band that shows while the phone is held
+     * upright, so upright can be found without reading the slider. Full
+     * strength within TILT_FAR_DEG, where the tilt range is already at its far
+     * end, and gone by HORIZON_FADE_DEG.
+     */
+    private static final float HORIZON_FADE_DEG = 25f;
+    private static final int COL_HORIZON = 0x8C8A9A9C;
+    private static final float HORIZON_HALF_DP = 16f;
+
     /** The list shrinks a name to fit rather than cutting it, down to this floor. */
     private static final float LIST_MAX_SP = 18f;
     private static final float LIST_MIN_SP = 12f;
@@ -166,11 +200,11 @@ final class WorldView extends View {
     /** Font metrics for the two lines of a label, read once. */
     private float nameAsc, nameDesc, distAsc, distDesc;
     private final RectF oval = new RectF();
+    private final Paint pHorizon = new Paint();
     private Listener listener;
 
     /** Set while a finger is on the range slider, so taps elsewhere stay unclaimed. */
     private boolean sliding;
-    private int slideStartIndex;
     /** Set while a finger is dragging the list. */
     private boolean scrolling;
     /** Which button a finger went down on: BTN_NONE, BTN_SEARCH or BTN_SETTINGS. */
@@ -199,6 +233,11 @@ final class WorldView extends View {
     private boolean permissionNeeded;
 
     private int rangeIndex = 3;   // 1000 m
+    /** The step the last search was sent for, so a return to it sends none. */
+    private int searchedIndex = rangeIndex;
+    /** The tilt sets the range, and the slider only shows it. */
+    private boolean tiltRange;
+    private final Runnable commitRange = this::commitRange;
     private String query = "";
 
     // --- wording, read once: onDraw() must not touch resources ------------
@@ -315,6 +354,7 @@ final class WorldView extends View {
         headingDeg = azimuth;
         tiltDeg = tilt;
         compassAccuracy = accuracy;
+        if (tiltRange) followTilt();
         int whole = (int) (azimuth + 0.5f) % 360;
         if (whole != lastHeadingInt) {
             lastHeadingInt = whole;
@@ -383,6 +423,46 @@ final class WorldView extends View {
         return RANGES[rangeIndex];
     }
 
+    /** Whether the tilt sets the range. While it does, the slider cannot be dragged. */
+    void setTiltRange(boolean on) {
+        if (on == tiltRange) return;
+        tiltRange = on;
+        if (on) {
+            sliding = false;
+            if (!Float.isNaN(headingDeg)) followTilt();
+        }
+        postInvalidateOnAnimation();
+    }
+
+    /**
+     * Moves the range to the step the tilt asks for. Upright is 0° here and
+     * flat is ±90°: which way up the screen faces makes no difference.
+     */
+    private void followTilt() {
+        float lean = Math.abs(tiltDeg);
+        float t = (TILT_NEAR_DEG - lean) / (TILT_NEAR_DEG - TILT_FAR_DEG);
+        if (t < 0f) t = 0f;
+        if (t > 1f) t = 1f;
+        float pos = t * (RANGES.length - 1);
+        if (Math.abs(pos - rangeIndex) < 0.5f + TILT_HYSTERESIS) return;
+        setRangeIndex(Math.round(pos), false);
+        removeCallbacks(commitRange);
+        postDelayed(commitRange, TILT_SETTLE_MS);
+    }
+
+    /** Sends the search for the step now showing, unless it was the last one sent. */
+    private void commitRange() {
+        if (rangeIndex == searchedIndex) return;
+        searchedIndex = rangeIndex;
+        if (listener != null) listener.onRangeChanged(getRangeM());
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        removeCallbacks(commitRange);
+        super.onDetachedFromWindow();
+    }
+
     private void setRangeIndex(int idx, boolean notify) {
         rangeIndex = idx;
         int r = RANGES[idx];
@@ -403,6 +483,12 @@ final class WorldView extends View {
             places.get(i).relocate(myLat, myLon, mPerDegLon);
         }
         Collections.sort(places, (a, b) -> Float.compare(a.distM, b.distM));
+        // Drawn translated to wherever the horizon is, so the shader is built once.
+        float hh = HORIZON_HALF_DP * dp;
+        pHorizon.setShader(new LinearGradient(0, -hh, 0, hh,
+                new int[]{COL_HORIZON & 0x00FFFFFF, COL_HORIZON, COL_HORIZON & 0x00FFFFFF},
+                null, Shader.TileMode.CLAMP));
+
         prepareLabels();
     }
 
@@ -456,9 +542,9 @@ final class WorldView extends View {
                 return true;
             }
         }
-        if (action == MotionEvent.ACTION_DOWN && sliderHit.contains(event.getX(), event.getY())) {
+        if (action == MotionEvent.ACTION_DOWN && !tiltRange
+                && sliderHit.contains(event.getX(), event.getY())) {
             sliding = true;
-            slideStartIndex = rangeIndex;
             getParent().requestDisallowInterceptTouchEvent(true);
             setRangeIndex(indexAt(event.getY()), false);
             return true;
@@ -507,9 +593,7 @@ final class WorldView extends View {
                 sliding = false;
                 // Only once the finger lifts, so dragging across the detents
                 // does not fire a search at every step.
-                if (rangeIndex != slideStartIndex && listener != null) {
-                    listener.onRangeChanged(getRangeM());
-                }
+                commitRange();
                 performClick();
             }
             return true;
@@ -648,6 +732,7 @@ final class WorldView extends View {
         float horizonY = horizonY();
 
         drawStatus(canvas, w);
+        drawHorizon(canvas, w, horizonY);
         drawGround(canvas, horizonY);
         drawPlaces(canvas, horizonY);
         drawCompass(canvas);
@@ -659,6 +744,20 @@ final class WorldView extends View {
             postInvalidateOnAnimation();
         }
         drawNotice(canvas);
+    }
+
+    /** The grey glow along the horizon, strongest with the phone upright. */
+    private void drawHorizon(Canvas canvas, int w, float horizonY) {
+        float lean = Math.abs(tiltDeg);
+        if (lean >= HORIZON_FADE_DEG) return;
+        float a = lean <= TILT_FAR_DEG ? 1f
+                : (HORIZON_FADE_DEG - lean) / (HORIZON_FADE_DEG - TILT_FAR_DEG);
+        pHorizon.setAlpha(Math.round(255 * a));
+        float hh = HORIZON_HALF_DP * dp;
+        canvas.save();
+        canvas.translate(0, horizonY);
+        canvas.drawRect(0, -hh, w, hh, pHorizon);
+        canvas.restore();
     }
 
     /**
@@ -745,7 +844,9 @@ final class WorldView extends View {
         float y = sliderY(rangeIndex);
         float tw = 11 * dp, th = 18 * dp;
         oval.set(sliderX - tw, y - th, sliderX + tw, y + th);
-        pButton.setColor(sliding ? COL_TEXT : COL_TARGET);
+        // Grey while the tilt drives it: it still says where the range is, but
+        // no longer looks like something to take hold of.
+        pButton.setColor(tiltRange ? COL_SLIDER_OFF : sliding ? COL_TEXT : COL_TARGET);
         canvas.drawRoundRect(oval, tw, tw, pButton);
         pButton.setColor(COL_BUTTON);
         for (int g = -1; g <= 1; g++) {
@@ -767,7 +868,7 @@ final class WorldView extends View {
         canvas.drawRoundRect(oval, 14 * dp, 14 * dp, pNotice);
         canvas.drawRoundRect(oval, 14 * dp, 14 * dp, pBubble);
         pSmall.setTextAlign(Paint.Align.RIGHT);
-        pSmall.setColor(COL_TARGET);
+        pSmall.setColor(tiltRange ? COL_TEXT : COL_TARGET);
         canvas.drawText(rangeShort, right - 8 * dp, y + 6 * dp, pSmall);
         pSmall.setColor(COL_DIM);
         pSmall.setTextAlign(Paint.Align.LEFT);

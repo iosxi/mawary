@@ -52,6 +52,8 @@
     <string name="section_search">検索</string>
     <string name="transparency_title">ラベルの透過度</string>
     <string name="transparency_message">名前の札の地をどれだけ透かすか。0% で不透明、100% で地なし。下の見本がその場で変わります。</string>
+    <string name="tilt_range_title">傾きで範囲を決める</string>
+    <string name="tilt_range_message">スマホを立てるほど遠く（最大 10km）、寝かせるほど近く（最小 100m）を探します。オンの間は範囲のスライダーが灰色になり、指では動かせません。</string>
     <string name="percent_fmt">%1$d%%</string>
     <string name="preview_name">見本公園</string>
     <string name="preview_dist">120m</string>
