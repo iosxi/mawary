@@ -34,6 +34,7 @@
     <string name="none_in_range">範囲内に何もありません</string>
     <string name="err_google">Google: %1$s</string>
     <string name="err_osm">OSM: %1$s</string>
+    <string name="err_busy">地図サーバが混雑しています。少し待ちます</string>
     <string name="no_compass">この端末には方位センサがありません</string>
     <string name="location_denied">位置情報が許可されていません</string>
 

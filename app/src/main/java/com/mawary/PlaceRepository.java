@@ -17,6 +17,8 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
@@ -48,7 +50,7 @@ final class PlaceRepository {
 
     private static final long STALE_MS = 120_000L;
     private static final long RETRY_MS = 15_000L;
-    private static final int CONNECT_MS = 8_000;
+    private static final int CONNECT_MS = 6_000;
     /** Overpass asks its own backend for up to 20 s, so the read wait has to outlast that. */
     private static final int READ_MS = 20_000;
     /** How many places the view is given, nearest first. */
@@ -63,15 +65,37 @@ final class PlaceRepository {
     private static final int OVERPASS_LIMIT = 250;
 
     /**
-     * Overpass mirrors, tried in order. The main instance rate-limits and times
-     * out under load often enough that a single endpoint is not dependable, and
-     * it is the only source that works without an API key.
+     * Overpass endpoints, tried in order.
+     *
+     * <p>These three were measured, not guessed. Of the public instances,
+     * overpass-api.de and its two aliases were the only ones that answered at
+     * all from a Japanese connection with Japanese data; kumi.systems,
+     * private.coffee and monicz.dev accepted the TCP connection and then never
+     * replied, and overpass.osm.ch answers in a second but only holds Swiss
+     * data. Keeping dead names in this list was worse than having no fallback:
+     * each one burned the full read timeout before the next was tried, which is
+     * what turned a rate-limited request into a minute of "searching".
+     *
+     * <p>The three share a rate limit, but not their load: the main name has
+     * returned 504 while lz4 answered in 1.4 s.
      */
     private static final String[] OVERPASS = {
             "https://overpass-api.de/api/interpreter",
-            "https://overpass.kumi.systems/api/interpreter",
-            "https://overpass.private.coffee/api/interpreter",
+            "https://lz4.overpass-api.de/api/interpreter",
+            "https://z.overpass-api.de/api/interpreter",
     };
+
+    /**
+     * Overpass allows a couple of queries in quick succession and then answers
+     * 429 — and takes about ten seconds to say so. Measured: two back-to-back
+     * queries are fine, the third is refused. So we pace ourselves rather than
+     * being paced.
+     */
+    private static final long MIN_GAP_MS = 5_000L;
+
+    /** How long a fetched answer stays good enough to hand back without asking again. */
+    private static final long CACHE_TTL_MS = 180_000L;
+    private static final int CACHE_MAX = 8;
 
     private final ExecutorService io = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "mawary-net");
@@ -146,6 +170,43 @@ final class PlaceRepository {
     private boolean pending;
     private double pendLat, pendLon;
     private int pendRadius;
+
+    /**
+     * Answers we already have, keyed by what was asked and roughly where from.
+     * Clearing a search word puts back exactly the question that was asked a
+     * moment ago, and asking Overpass again for something we are still holding
+     * is both slow and the quickest way to be rate limited.
+     */
+    private final LinkedHashMap<String, Cached> cache =
+            new LinkedHashMap<String, Cached>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Cached> eldest) {
+                    return size() > CACHE_MAX;
+                }
+            };
+
+    /** When the last Overpass round trip finished, for pacing. */
+    private long lastNetworkMs;
+    /**
+     * What the view is already showing. Position updates keep arriving while
+     * standing still, and handing the same cached answer over every few seconds
+     * would redraw the screen and throw away the user's place in the list.
+     */
+    private String deliveredKey = "";
+    /** How long to wait before trying again after everything refused. */
+    private long backoffMs = RETRY_MS;
+
+    private static final class Cached {
+        final List<Poi> places;
+        final String source;
+        final long at;
+
+        Cached(List<Poi> places, String source, long at) {
+            this.places = places;
+            this.source = source;
+            this.at = at;
+        }
+    }
     private volatile boolean inFlight;
     private double lastLat = Double.NaN, lastLon = Double.NaN;
     private int lastRadius;
@@ -174,6 +235,12 @@ final class PlaceRepository {
         invalidate();
     }
 
+    /** What was asked, and roughly from where: about 11 m of rounding. */
+    private String cacheKey(double lat, double lon, int radiusM) {
+        return query + "|" + radiusM + "|"
+                + Math.round(lat * 10000d) + "," + Math.round(lon * 10000d);
+    }
+
     /** Forces the next request through, ignoring the coalescing rules. */
     void invalidate() {
         lastLat = Double.NaN;
@@ -192,9 +259,20 @@ final class PlaceRepository {
 
     /** Re-runs the last request after a failure, so a flaky mirror is not fatal. */
     private void retryLast() {
-        if (Double.isNaN(lastLat)) return;
-        double lat = lastLat, lon = lastLon;
-        int radius = lastRadius;
+        double lat, lon;
+        int radius;
+        if (pending) {
+            lat = pendLat;
+            lon = pendLon;
+            radius = pendRadius;
+            pending = false;
+        } else if (!Double.isNaN(lastLat)) {
+            lat = lastLat;
+            lon = lastLon;
+            radius = lastRadius;
+        } else {
+            return;
+        }
         invalidate();
         requestAround(lat, lon, radius);
     }
@@ -204,6 +282,26 @@ final class PlaceRepository {
      * itself whether anything actually needs fetching.
      */
     void requestAround(double lat, double lon, int radiusM) {
+        String key = cacheKey(lat, lon, radiusM);
+        Cached hit = cache.get(key);
+        if (hit != null && System.currentTimeMillis() - hit.at < CACHE_TTL_MS) {
+            if (key.equals(deliveredKey)) return;   // already on screen
+            // Supersede anything still in the air: it is answering an older
+            // question than the one we are about to satisfy from memory.
+            generation.incrementAndGet();
+            pending = false;
+            main.removeCallbacks(retry);
+            lastLat = lat;
+            lastLon = lon;
+            lastRadius = radiusM;
+            lastFetchMs = hit.at;
+            Log.i(TAG, "requestAround: answered from cache, " + hit.places.size() + " places");
+            deliveredKey = key;
+            listener.onStatus("");
+            listener.onPlaces(hit.places, hit.source);
+            return;
+        }
+
         if (inFlight) {
             pending = true;
             pendLat = lat;
@@ -223,6 +321,20 @@ final class PlaceRepository {
                 return;
             }
         }
+        long sinceNetwork = now - lastNetworkMs;
+        if (lastNetworkMs != 0L && sinceNetwork < MIN_GAP_MS) {
+            // Too soon. Hold it rather than spend it on a 429 that will take ten
+            // seconds to arrive.
+            pending = true;
+            pendLat = lat;
+            pendLon = lon;
+            pendRadius = radiusM;
+            main.removeCallbacks(retry);
+            main.postDelayed(retry, MIN_GAP_MS - sinceNetwork);
+            Log.i(TAG, "requestAround: pacing, " + (MIN_GAP_MS - sinceNetwork) + "ms to go");
+            return;
+        }
+
         inFlight = true;
         main.removeCallbacks(retry);
         lastLat = lat;
@@ -254,7 +366,14 @@ final class PlaceRepository {
                     }
                 } catch (Exception e) {
                     Log.w(TAG, "overpass failed", e);
-                    if (status == null) status = ctx.getString(R.string.err_osm, shortMessage(e));
+                    if (status == null) {
+                        String m = shortMessage(e);
+                        // 429 is Overpass saying "you are asking too often". It
+                        // is not a fault to report as one.
+                        status = m.contains("429")
+                                ? ctx.getString(R.string.err_busy)
+                                : ctx.getString(R.string.err_osm, m);
+                    }
                 }
             }
             final List<Poi> out = result;
@@ -264,6 +383,11 @@ final class PlaceRepository {
                     + " count=" + (result == null ? -1 : result.size()) + " status=" + status);
             main.post(() -> {
                 inFlight = false;
+                lastNetworkMs = System.currentTimeMillis();
+                if (out != null && !out.isEmpty()) {
+                    cache.put(key, new Cached(out, src, lastNetworkMs));
+                    backoffMs = RETRY_MS;
+                }
                 if (pending) {
                     pending = false;
                     invalidate();
@@ -272,12 +396,15 @@ final class PlaceRepository {
                 if (gen != generation.get()) return;    // superseded by a newer request
                 if (msg != null) listener.onStatus(msg);
                 if (out != null) {
+                    deliveredKey = key;
                     listener.onPlaces(out, src);
                 } else {
-                    // Every source refused. Come back to it rather than sitting
-                    // on an error until the user happens to walk far enough.
+                    // Every endpoint refused. Come back to it rather than sitting
+                    // on an error until the user happens to walk far enough, but
+                    // back off: retrying hard is how the rate limit was earned.
                     lastFetchMs = 0L;
-                    main.postDelayed(retry, RETRY_MS);
+                    main.postDelayed(retry, backoffMs);
+                    backoffMs = Math.min(backoffMs * 2, 60_000L);
                 }
             });
         });
