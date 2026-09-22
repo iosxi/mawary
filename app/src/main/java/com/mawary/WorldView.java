@@ -113,6 +113,8 @@ final class WorldView extends View {
 
     private static final int COL_BG = 0xFF05080A;
     private static final int COL_GRID = 0xFF27525C;
+    /** Label outlines: a step up from the grid, so a bubble stands off the ground lines. */
+    private static final int COL_BUBBLE = 0xFF3F818A;
     private static final int COL_MID = 0xFF49A0A6;
     private static final int COL_ACCENT = 0xFF5CF0D8;
     private static final int COL_TARGET = 0xFFFFC46B;
@@ -135,9 +137,11 @@ final class WorldView extends View {
     private final Paint pSmall = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pTiny = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pLabelBg = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint pLeader = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pBubble = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final Path path = new Path();
+    /** A label's tail, before it is merged into the bubble. */
+    private final Path tail = new Path();
     /**
      * Labels placed this frame, nearest first: left, top, right, bottom, then
      * where the leader meets it. Filled before anything is drawn, so every
@@ -246,7 +250,9 @@ final class WorldView extends View {
         pLabelBg.setStyle(Paint.Style.FILL);
         pLabelBg.setColor(COL_LABEL_BG);
         setLabelTransparency(DEFAULT_LABEL_TRANSPARENCY);
-        stroke(pLeader, COL_TARGET, 1.2f);
+        stroke(pBubble, COL_BUBBLE, 1.4f);
+        // Round, so the tail's sharp point does not grow a miter spike past the stake.
+        pBubble.setStrokeJoin(Paint.Join.ROUND);
 
         sScanning = ctx.getString(R.string.source_scanning);
         sNeedPermission = ctx.getString(R.string.need_permission);
@@ -966,8 +972,8 @@ final class WorldView extends View {
     }
 
     /**
-     * One label as placed: a leader from the middle of the stake's head to the
-     * label, then the label itself, name over distance on a see-through ground.
+     * One label as placed: a speech bubble whose tail points at the middle of
+     * the stake's head, name over distance on a see-through ground.
      */
     private void drawLabel(Canvas canvas, int n, float stem) {
         Poi p = labelPoi[n];
@@ -975,11 +981,35 @@ final class WorldView extends View {
         float right = labelBox[n * 4 + 2], bottom = labelBox[n * 4 + 3];
         float mid = (left + right) / 2f;
 
-        canvas.drawLine(p.sx, p.sy - stem - 5 * dp, labelEnd[n * 2], labelEnd[n * 2 + 1], pLeader);
-
-        oval.set(left, top, right, bottom);
-        canvas.drawRoundRect(oval, 4 * dp, 4 * dp, pLabelBg);
-        canvas.drawRoundRect(oval, 4 * dp, 4 * dp, pGrid);
+        // A speech bubble: box and tail are one outline, so there is no
+        // telling a line apart from the label it belongs to. The tail is kept
+        // a sliver — as wide at the root as it needs to read as a tail, and
+        // no wider — and runs to a point at the middle of the stake's head.
+        path.rewind();
+        path.addRoundRect(left, top, right, bottom, 4 * dp, 4 * dp, Path.Direction.CW);
+        float tipX = p.sx, tipY = p.sy - stem - 5 * dp;
+        float ex = labelEnd[n * 2], ey = labelEnd[n * 2 + 1];
+        if (Math.hypot(tipX - ex, tipY - ey) > 2 * dp) {
+            // The root sits a little inside the box, so the two shapes merge
+            // into one outline instead of meeting at a seam.
+            float mx = mid - ex, my = (top + bottom) / 2f - ey;
+            float ml = (float) Math.hypot(mx, my);
+            float inset = Math.min(8 * dp, ml);
+            float bx = ml > 0 ? ex + mx / ml * inset : ex;
+            float by = ml > 0 ? ey + my / ml * inset : ey;
+            float dx = tipX - bx, dy = tipY - by;
+            float dl = (float) Math.hypot(dx, dy);
+            float half = 3 * dp;
+            float nx = -dy / dl * half, ny = dx / dl * half;
+            tail.rewind();
+            tail.moveTo(bx + nx, by + ny);
+            tail.lineTo(tipX, tipY);
+            tail.lineTo(bx - nx, by - ny);
+            tail.close();
+            path.op(tail, Path.Op.UNION);
+        }
+        canvas.drawPath(path, pLabelBg);
+        canvas.drawPath(path, pBubble);
 
         float nameBase = top + 3 * dp + nameAsc;
         pName.setTextAlign(Paint.Align.CENTER);
