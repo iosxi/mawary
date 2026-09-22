@@ -120,16 +120,20 @@ final class Heading implements SensorEventListener {
 
         double rad = Math.toRadians(azimuth);
         float e = (float) Math.sin(rad), n = (float) Math.cos(rad);
+        // The tilt gets the same smoothing: things on screen follow it, and
+        // unsmoothed they shiver with the hand.
+        float tilt = Geo.backTilt(rotation);
         if (!primed) {
             smoothE = e;
             smoothN = n;
+            tiltDeg = tilt;
             primed = true;
         } else {
             smoothE += ALPHA * (e - smoothE);
             smoothN += ALPHA * (n - smoothN);
+            tiltDeg += ALPHA * (tilt - tiltDeg);
         }
 
-        tiltDeg = Geo.backTilt(rotation);
         listener.onHeading(
                 Geo.norm360((float) Math.toDegrees(Math.atan2(smoothE, smoothN))),
                 tiltDeg, accuracy);

@@ -110,6 +110,8 @@ final class WorldView extends View {
     /** Below this the reading has not visibly changed, so there is nothing to redraw. */
     private static final float HEADING_EPS = 0.4f;
     private static final float TILT_EPS = 0.8f;
+    /** The ridge moves about 25 px a degree, so while it shows it needs finer steps. */
+    private static final float TILT_EPS_RIDGE = 0.1f;
 
     /**
      * The tilt-driven range. Held upright (the back facing the horizon) is the
@@ -134,14 +136,21 @@ final class WorldView extends View {
     private static final int COL_SLIDER_OFF = 0xFF6F7F80;
 
     /**
-     * The horizon glow: a soft grey band that shows while the phone is held
-     * upright, so upright can be found without reading the slider. Full
-     * strength within TILT_FAR_DEG, where the tilt range is already at its far
-     * end, and gone by HORIZON_FADE_DEG.
+     * The ridge: a row of low hills straight ahead that shows while the phone
+     * is held upright, so upright can be found without reading the slider.
+     * It is a sign, not scenery: upright puts it mid-field, dead ahead,
+     * whatever the real horizon is doing. Tipping the phone moves it the way
+     * a horizon would move, down-tilt lifting it, and by RIDGE_FADE_DEG it
+     * has slid most of the way to the edge of the field and faded out. Full
+     * strength within TILT_FAR_DEG, where the tilt range is at its far end.
      */
-    private static final float HORIZON_FADE_DEG = 25f;
-    private static final int COL_HORIZON = 0x8C8A9A9C;
-    private static final float HORIZON_HALF_DP = 16f;
+    private static final float RIDGE_FADE_DEG = 25f;
+    private static final int COL_RIDGE = 0xFF8A9A9C;
+    /** The crisp line along the tops, and the fill that fades out beneath it. */
+    private static final int RIDGE_LINE_ALPHA = 0x99;
+    private static final int RIDGE_FILL_ALPHA = 0x66;
+    /** How far below the foot of the hills the fill takes to fade out. */
+    private static final float RIDGE_DEPTH_DP = 44f;
 
     /** The list shrinks a name to fit rather than cutting it, down to this floor. */
     private static final float LIST_MAX_SP = 18f;
@@ -200,7 +209,11 @@ final class WorldView extends View {
     /** Font metrics for the two lines of a label, read once. */
     private float nameAsc, nameDesc, distAsc, distDesc;
     private final RectF oval = new RectF();
-    private final Paint pHorizon = new Paint();
+    private final Paint pRidgeFill = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pRidgeLine = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** The ridge around y = 0: its outline, and the same closed down for the fill. */
+    private final Path ridgeLine = new Path(), ridgeFill = new Path();
+    private float ridgeY;
     private Listener listener;
 
     /** Set while a finger is on the range slider, so taps elsewhere stay unclaimed. */
@@ -347,7 +360,8 @@ final class WorldView extends View {
     void setHeading(float azimuth, float tilt, int accuracy) {
         if (!Float.isNaN(headingDeg)
                 && Math.abs(Geo.delta180(azimuth, headingDeg)) < HEADING_EPS
-                && Math.abs(tilt - tiltDeg) < TILT_EPS
+                && Math.abs(tilt - tiltDeg) < (Math.abs(tilt) < RIDGE_FADE_DEG
+                        ? TILT_EPS_RIDGE : TILT_EPS)
                 && accuracy == compassAccuracy) {
             return;
         }
@@ -483,12 +497,6 @@ final class WorldView extends View {
             places.get(i).relocate(myLat, myLon, mPerDegLon);
         }
         Collections.sort(places, (a, b) -> Float.compare(a.distM, b.distM));
-        // Drawn translated to wherever the horizon is, so the shader is built once.
-        float hh = HORIZON_HALF_DP * dp;
-        pHorizon.setShader(new LinearGradient(0, -hh, 0, hh,
-                new int[]{COL_HORIZON & 0x00FFFFFF, COL_HORIZON, COL_HORIZON & 0x00FFFFFF},
-                null, Shader.TileMode.CLAMP));
-
         prepareLabels();
     }
 
@@ -685,6 +693,9 @@ final class WorldView extends View {
         fieldBottom = compassCy;
         horizonBase = fieldTop + (fieldBottom - fieldTop) * 0.19f;
 
+        ridgeY = (fieldTop + fieldBottom) / 2f;
+        buildRidge(w);
+
         // Low and short: down beside the compass, where the ground is nearest
         // and least is ever drawn, ending just above the list.
         sliderBottom = listTop - 44 * dp;
@@ -732,7 +743,7 @@ final class WorldView extends View {
         float horizonY = horizonY();
 
         drawStatus(canvas, w);
-        drawHorizon(canvas, w, horizonY);
+        drawRidge(canvas);
         drawGround(canvas, horizonY);
         drawPlaces(canvas, horizonY);
         drawCompass(canvas);
@@ -746,17 +757,57 @@ final class WorldView extends View {
         drawNotice(canvas);
     }
 
-    /** The grey glow along the horizon, strongest with the phone upright. */
-    private void drawHorizon(Canvas canvas, int w, float horizonY) {
+    /**
+     * Lays out the hills once per size: flats and peaks of assorted widths,
+     * the peaks a little lopsided, from a fixed seed so they are the same
+     * hills every time. Built around y = 0 and drawn translated.
+     */
+    private void buildRidge(int w) {
+        java.util.Random rnd = new java.util.Random(7);
+        ridgeLine.rewind();
+        float x = 0f, maxH = 0f;
+        ridgeLine.moveTo(x, 0f);
+        while (x < w) {
+            x += (rnd.nextFloat() < 0.4f ? rnd.nextFloat() * 22f : 0f) * dp;
+            ridgeLine.lineTo(x, 0f);
+            float width = (14f + rnd.nextFloat() * 34f) * dp;
+            float height = width * (0.28f + rnd.nextFloat() * 0.3f);
+            float peak = x + width * (0.35f + rnd.nextFloat() * 0.3f);
+            ridgeLine.lineTo(peak, -height);
+            x += width;
+            ridgeLine.lineTo(x, 0f);
+            maxH = Math.max(maxH, height);
+        }
+        float depth = RIDGE_DEPTH_DP * dp;
+        ridgeFill.set(ridgeLine);
+        ridgeFill.lineTo(x, depth);
+        ridgeFill.lineTo(0f, depth);
+        ridgeFill.close();
+
+        int solid = (COL_RIDGE & 0x00FFFFFF) | (RIDGE_FILL_ALPHA << 24);
+        pRidgeFill.setStyle(Paint.Style.FILL);
+        pRidgeFill.setShader(new LinearGradient(0, -maxH, 0, depth,
+                solid, COL_RIDGE & 0x00FFFFFF, Shader.TileMode.CLAMP));
+        pRidgeLine.setStyle(Paint.Style.STROKE);
+        pRidgeLine.setStrokeWidth(1.4f * dp);
+        pRidgeLine.setStrokeJoin(Paint.Join.MITER);
+    }
+
+    /** The hills straight ahead, stronger the nearer the phone is to upright. */
+    private void drawRidge(Canvas canvas) {
         float lean = Math.abs(tiltDeg);
-        if (lean >= HORIZON_FADE_DEG) return;
+        if (lean >= RIDGE_FADE_DEG) return;
         float a = lean <= TILT_FAR_DEG ? 1f
-                : (HORIZON_FADE_DEG - lean) / (HORIZON_FADE_DEG - TILT_FAR_DEG);
-        pHorizon.setAlpha(Math.round(255 * a));
-        float hh = HORIZON_HALF_DP * dp;
+                : (RIDGE_FADE_DEG - lean) / (RIDGE_FADE_DEG - TILT_FAR_DEG);
+        pRidgeFill.setAlpha(Math.round(255 * a));
+        pRidgeLine.setColor(COL_RIDGE);
+        pRidgeLine.setAlpha(Math.round(RIDGE_LINE_ALPHA * a));
+        // Half the field's height over the fade: where it has gone as it vanishes.
+        float perDeg = (fieldBottom - fieldTop) * 0.5f / RIDGE_FADE_DEG;
         canvas.save();
-        canvas.translate(0, horizonY);
-        canvas.drawRect(0, -hh, w, hh, pHorizon);
+        canvas.translate(0, ridgeY + tiltDeg * perDeg);
+        canvas.drawPath(ridgeFill, pRidgeFill);
+        canvas.drawPath(ridgeLine, pRidgeLine);
         canvas.restore();
     }
 
