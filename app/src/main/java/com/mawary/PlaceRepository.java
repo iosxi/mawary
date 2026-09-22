@@ -21,8 +21,14 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -52,7 +58,8 @@ final class PlaceRepository {
     private static final long RETRY_MS = 15_000L;
     private static final int CONNECT_MS = 6_000;
     /** Overpass asks its own backend for up to 20 s, so the read wait has to outlast that. */
-    private static final int READ_MS = 20_000;
+    /** A refusal arrives in about ten seconds, so waiting twenty buys nothing. */
+    private static final int READ_MS = 14_000;
     /** How many places the view is given, nearest first. */
     private static final int MAX_RESULTS = 40;
     /**
@@ -91,7 +98,20 @@ final class PlaceRepository {
      * queries are fine, the third is refused. So we pace ourselves rather than
      * being paced.
      */
-    private static final long MIN_GAP_MS = 5_000L;
+    private static final long MIN_GAP_MS = 1_500L;
+
+    /**
+     * How long one endpoint gets to itself before a second is asked in
+     * parallel. Measured: a healthy answer comes back in 2 to 3 seconds, while
+     * a refusal takes nine to eleven. Waiting for the refusal before trying
+     * anywhere else is what made a search feel like it took a minute. Two at a
+     * time is the most Overpass asks callers to run, so a third only starts
+     * once one of the first two has given up.
+     */
+    private static final long HEDGE_MS = 2_500L;
+
+    /** Total time all endpoints together get before the attempt is a failure. */
+    private static final long BUDGET_MS = 18_000L;
 
     /** How long a fetched answer stays good enough to hand back without asking again. */
     private static final long CACHE_TTL_MS = 180_000L;
@@ -103,6 +123,19 @@ final class PlaceRepository {
         t.setPriority(Thread.MIN_PRIORITY);
         return t;
     });
+    /**
+     * Endpoint attempts, at most two at once. Separate from the single-threaded
+     * queue above, which owns one search from start to finish.
+     */
+    private final ExecutorService net = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "mawary-net-ep");
+        t.setDaemon(true);
+        t.setPriority(Thread.MIN_PRIORITY);
+        return t;
+    });
+    /** Which endpoint leads next time, so no one of them takes every request. */
+    private int rotation;
+
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Listener listener;
     private final AtomicInteger generation = new AtomicInteger();
@@ -193,6 +226,8 @@ final class PlaceRepository {
      * would redraw the screen and throw away the user's place in the list.
      */
     private String deliveredKey = "";
+    /** The key we last answered out of the sweep we were holding, so we do it once. */
+    private String localKey = "";
     /** How long to wait before trying again after everything refused. */
     private long backoffMs = RETRY_MS;
 
@@ -235,16 +270,61 @@ final class PlaceRepository {
         invalidate();
     }
 
-    /** What was asked, and roughly from where: about 11 m of rounding. */
+    /**
+     * What was asked, and roughly from where. The rounding is about 110 m,
+     * which is the same order as the distance that makes us refetch anyway
+     * (a quarter of the range). Rounding to 11 m meant that standing still with
+     * a drifting GPS fix produced a different key every few seconds, and the
+     * cache never hit the one case it exists for: taking a search word back
+     * off again.
+     */
     private String cacheKey(double lat, double lon, int radiusM) {
-        return query + "|" + radiusM + "|"
-                + Math.round(lat * 10000d) + "," + Math.round(lon * 10000d);
+        return cacheKey(query, lat, lon, radiusM);
+    }
+
+    private static String cacheKey(String q, double lat, double lon, int radiusM) {
+        return q + "|" + radiusM + "|"
+                + Math.round(lat * 1000d) + "," + Math.round(lon * 1000d);
     }
 
     /** Forces the next request through, ignoring the coalescing rules. */
     void invalidate() {
         lastLat = Double.NaN;
         lastFetchMs = 0L;
+    }
+
+    /** The places already in hand whose name contains the word. */
+    private static List<Poi> matching(List<Poi> all, String word) {
+        String needle = fold(word);
+        List<Poi> out = new ArrayList<>();
+        for (int i = 0; i < all.size(); i++) {
+            Poi p = all.get(i);
+            if (fold(p.name).contains(needle)) out.add(p);
+        }
+        return out;
+    }
+
+    /**
+     * The places already in hand that carry one of a topic's tags. "shop" on
+     * its own means any shop; "amenity=cafe" means that one value.
+     */
+    private static List<Poi> carrying(List<Poi> all, String[] tags) {
+        List<Poi> out = new ArrayList<>();
+        for (int i = 0; i < all.size(); i++) {
+            Poi p = all.get(i);
+            for (String tag : tags) {
+                int eq = tag.indexOf('=');
+                boolean hit = eq < 0
+                        ? p.key.equals(tag)
+                        : p.key.equals(tag.substring(0, eq))
+                                && p.kind.equals(tag.substring(eq + 1));
+                if (hit) {
+                    out.add(p);
+                    break;
+                }
+            }
+        }
+        return out;
     }
 
     /** Lower case, so a topic is found whether it was typed Station or station. */
@@ -255,6 +335,7 @@ final class PlaceRepository {
     void shutdown() {
         main.removeCallbacks(retry);
         io.shutdownNow();
+        net.shutdownNow();
     }
 
     /** Re-runs the last request after a failure, so a flaky mirror is not fatal. */
@@ -295,11 +376,33 @@ final class PlaceRepository {
             lastLon = lon;
             lastRadius = radiusM;
             lastFetchMs = hit.at;
-            Log.i(TAG, "requestAround: answered from cache, " + hit.places.size() + " places");
+            Log.i(TAG, "requestAround: answered from cache, " + hit.places.size() + " held");
             deliveredKey = key;
             listener.onStatus("");
-            listener.onPlaces(hit.places, hit.source);
+            listener.onPlaces(nearest(hit.places, lat, lon), hit.source);
             return;
+        }
+
+        // A word we have to ask Overpass about costs seconds even when it
+        // works, and ten of them when it does not. But the unfiltered sweep for
+        // this same spot is usually already in hand, and the answer is very
+        // often sitting inside it. Show that straight away and let the real
+        // query correct it when it lands.
+        if (!query.isEmpty() && !key.equals(deliveredKey) && !key.equals(localKey)) {
+            Cached base = cache.get(cacheKey("", lat, lon, radiusM));
+            if (base != null && System.currentTimeMillis() - base.at < CACHE_TTL_MS) {
+                String[] tags = topicFor(query);
+                List<Poi> found = tags == null
+                        ? matching(base.places, query)
+                        : carrying(base.places, tags);
+                if (!found.isEmpty()) {
+                    localKey = key;
+                    Log.i(TAG, "requestAround: " + found.size()
+                            + " from what we already hold, asking anyway");
+                    listener.onStatus(ctx.getString(R.string.from_hand));
+                    listener.onPlaces(nearest(found, lat, lon), base.source);
+                }
+            }
         }
 
         if (inFlight) {
@@ -385,6 +488,8 @@ final class PlaceRepository {
                 inFlight = false;
                 lastNetworkMs = System.currentTimeMillis();
                 if (out != null && !out.isEmpty()) {
+                    // The whole answer goes in, not the trimmed one: a later
+                    // word search reads it to answer without asking again.
                     cache.put(key, new Cached(out, src, lastNetworkMs));
                     backoffMs = RETRY_MS;
                 }
@@ -397,7 +502,7 @@ final class PlaceRepository {
                 if (msg != null) listener.onStatus(msg);
                 if (out != null) {
                     deliveredKey = key;
-                    listener.onPlaces(out, src);
+                    listener.onPlaces(nearest(out, lat, lon), src);
                 } else {
                     // Every endpoint refused. Come back to it rather than sitting
                     // on an error until the user happens to walk far enough, but
@@ -473,29 +578,70 @@ final class PlaceRepository {
 
     // -------------------------------------------------------------- Overpass
 
+    /**
+     * Asks the endpoints for the same thing, one at a time but overlapping, and
+     * returns whichever answers first.
+     *
+     * <p>The endpoints do not share a rate limit — measured: the main name
+     * answered 429 while lz4 returned in 5.1 s and z in 3.0 s — so a refusal
+     * from one says nothing about the others. Trying them strictly in turn
+     * meant paying ten seconds for each refusal before learning that, which is
+     * where the minute went.
+     */
     private List<Poi> fetchOverpass(double lat, double lon, int radiusM) throws Exception {
+        final String body = overpassBody(
+                String.format(Locale.US, "around:%d,%.6f,%.6f", radiusM, lat, lon), radiusM);
+        final int start = rotation++;
+        final long deadline = System.currentTimeMillis() + BUDGET_MS;
+
+        CompletionService<List<Poi>> cs = new ExecutorCompletionService<>(net);
+        List<Future<List<Poi>>> live = new ArrayList<>(OVERPASS.length);
         Exception last = null;
-        for (int i = 0; i < OVERPASS.length; i++) {
-            String endpoint = OVERPASS[i];
-            // Say which mirror we are on. Three of them, each allowed 20 s,
-            // is a long time to leave the screen saying nothing at all.
-            final String note = ctx.getString(R.string.searching_fmt, i + 1, OVERPASS.length);
-            main.post(() -> listener.onStatus(note));
-            try {
-                return fetchOverpass(endpoint, lat, lon, radiusM);
-            } catch (Exception e) {
-                Log.w(TAG, "overpass mirror failed: " + endpoint + " (" + shortMessage(e) + ")");
-                last = e;
+        int submitted = 0, failed = 0;
+        try {
+            for (int i = 0; i < OVERPASS.length; i++) {
+                final String endpoint = OVERPASS[(start + i) % OVERPASS.length];
+                final int attempt = i + 1;
+                main.post(() -> listener.onStatus(
+                        ctx.getString(R.string.searching_fmt, attempt, OVERPASS.length)));
+                live.add(cs.submit(new Callable<List<Poi>>() {
+                    @Override
+                    public List<Poi> call() throws Exception {
+                        return fetchOverpass(endpoint, body);
+                    }
+                }));
+
+                submitted++;
+                boolean lastOne = i == OVERPASS.length - 1;
+                long until = lastOne ? deadline
+                        : Math.min(deadline, System.currentTimeMillis() + HEDGE_MS);
+                while (failed < submitted) {
+                    long left = until - System.currentTimeMillis();
+                    if (left <= 0) break;
+                    Future<List<Poi>> done = cs.poll(left, TimeUnit.MILLISECONDS);
+                    if (done == null) break;
+                    try {
+                        return done.get();
+                    } catch (ExecutionException e) {
+                        Throwable cause = e.getCause();
+                        last = cause instanceof Exception ? (Exception) cause
+                                : new IllegalStateException(String.valueOf(cause));
+                        failed++;
+                        Log.w(TAG, "overpass endpoint failed (" + shortMessage(last) + ")");
+                        // One refusal says nothing about the others, which are
+                        // still out. Only once every attempt so far has come
+                        // back empty is there any point starting another.
+                    }
+                }
             }
+        } finally {
+            for (Future<List<Poi>> f : live) f.cancel(true);
         }
-        throw last == null ? new IllegalStateException("no mirror") : last;
+        throw last == null ? new IllegalStateException("no endpoint") : last;
     }
 
-    private List<Poi> fetchOverpass(String endpoint, double lat, double lon, int radiusM)
-            throws Exception {
-        String around = String.format(Locale.US, "around:%d,%.6f,%.6f", radiusM, lat, lon);
-        String q = "[out:json][timeout:20];(" + overpassBody(around, radiusM)
-                + ");out center " + OVERPASS_LIMIT + ";";
+    private List<Poi> fetchOverpass(String endpoint, String body) throws Exception {
+        String q = "[out:json][timeout:18];(" + body + ");out center " + OVERPASS_LIMIT + ";";
 
         HttpURLConnection c = open(endpoint);
         c.setRequestMethod("POST");
@@ -526,53 +672,71 @@ final class PlaceRepository {
             }
             if (Double.isNaN(elat) || Double.isNaN(elon)) continue;
 
-            String kind = tags.optString("amenity",
-                    tags.optString("shop", tags.optString("tourism",
-                            tags.optString("leisure", ""))));
-            out.add(new Poi(name, kind, elat, elon));
+            String tagKey = "", kind = "";
+            for (String k : new String[]{"amenity", "shop", "tourism", "leisure",
+                    "office", "railway", "natural", "historic", "place", "waterway"}) {
+                String v = tags.optString(k, "");
+                if (!v.isEmpty()) {
+                    tagKey = k;
+                    kind = v;
+                    break;
+                }
+            }
+            out.add(new Poi(name, tagKey, kind, elat, elon));
         }
-        return nearest(out, lat, lon);
+        return out;
     }
 
-    /** The statements that go inside the Overpass union, given what was asked for. */
+    /** The keys that make something a place worth showing. */
+    private static final String[] POI_KEYS =
+            {"amenity", "shop", "tourism", "leisure", "office"};
+
+    /**
+     * The statements that go inside the Overpass union, given what was asked for.
+     *
+     * <p>Every one of them is an {@code nwr}: one statement that covers nodes,
+     * ways and relations at once. Asking for nodes and ways separately doubles
+     * the statement count and costs far more than it looks — measured on the
+     * same data, the plain sweep took 12.0 s written out as ten node and way
+     * statements and 3.2 s written as six {@code nwr} ones.
+     */
     private String overpassBody(String around, int radiusM) {
         StringBuilder b = new StringBuilder(512);
         if (!query.isEmpty()) {
             String[] tags = topicFor(query);
             if (tags != null) {
-                for (String tag : tags) both(b, around, tag);
-            } else {
-                // Not a topic we know, so search the names themselves. Overpass
-                // matches these as regular expressions, which means the word has
-                // to be handed over with its metacharacters defused.
-                String re = escapeRegex(query);
-                b.append("node(").append(around).append(")[name~\"").append(re)
-                        .append("\"];");
-                b.append("way(").append(around).append(")[name~\"").append(re)
-                        .append("\"];");
+                for (String tag : tags) one(b, around, tag);
+                return b.toString();
             }
+            // Not a topic we know, so search the names themselves. Overpass
+            // matches these as regular expressions, which means the word has to
+            // be handed over with its metacharacters defused. The search is
+            // pinned to the same keys the rest of the app uses, which keeps it
+            // selective and stops a named kerb or road segment turning up as
+            // though it were a place.
+            String re = escapeRegex(query);
+            for (String key : POI_KEYS) {
+                b.append("nwr(").append(around).append(")[").append(key)
+                        .append("][name~\"").append(re).append("\"];");
+            }
+            b.append("nwr(").append(around).append(")[name~\"").append(re)
+                    .append("\"][railway];");
             return b.toString();
         }
 
         if (radiusM > WIDE_RADIUS) {
-            for (String tag : LANDMARKS) both(b, around, tag);
+            for (String tag : LANDMARKS) one(b, around, tag);
             return b.toString();
         }
 
-        for (String key : new String[]{"amenity", "shop", "tourism", "leisure", "office"}) {
-            b.append("node(").append(around).append(")[name][").append(key).append("];");
-        }
-        b.append("node(").append(around).append(")[name][railway=station];");
-        for (String key : new String[]{"amenity", "shop", "tourism", "leisure"}) {
-            b.append("way(").append(around).append(")[name][").append(key).append("];");
-        }
+        for (String key : POI_KEYS) one(b, around, key);
+        one(b, around, "railway=station");
         return b.toString();
     }
 
-    /** The same filter asked of both nodes and ways; a shop can be either. */
-    private static void both(StringBuilder b, String around, String tag) {
-        b.append("node(").append(around).append(")[name][").append(tag).append("];");
-        b.append("way(").append(around).append(")[name][").append(tag).append("];");
+    /** One filter, asked of nodes, ways and relations together. */
+    private static void one(StringBuilder b, String around, String tag) {
+        b.append("nwr(").append(around).append(")[name][").append(tag).append("];");
     }
 
     /** The tags a search word stands for, or null if it is just a word. */

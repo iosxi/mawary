@@ -238,10 +238,15 @@ public final class MainActivity extends Activity
         final EditText input = new EditText(this);
         input.setInputType(InputType.TYPE_CLASS_TEXT);
         input.setSingleLine(true);
+        // A faint "検索ワード" rather than a sample word: a sample sitting in the
+        // box reads as something already entered.
         input.setHint(R.string.search_hint);
+        input.setHintTextColor(0x66FFFFFF);
         input.setText(places.getQuery());
-        input.setSelection(input.getText().length());
         input.setTextColor(Color.WHITE);
+        // Coming back to change the word almost always means replacing it, so
+        // open with the old one selected and let the first keystroke clear it.
+        input.selectAll();
 
         new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog)
                 .setTitle(R.string.search_title)

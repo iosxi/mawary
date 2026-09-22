@@ -17,6 +17,7 @@
     <string name="need_permission">位置情報の許可が必要です</string>
     <string name="acquiring">現在地を取得しています…</string>
     <string name="searching">探しています…</string>
+    <string name="from_hand">手元の範囲から表示中。照会しています…</string>
     <string name="searching_fmt">探しています… %1$d/%2$d</string>
 
     <!-- 一覧と脚注 -->
@@ -41,7 +42,7 @@
     <!-- 検索 -->
     <string name="search_title">何を探しますか</string>
     <string name="search_message">「山岳」「駅」「コンビニ」のような言葉か、店名の一部を入れてください。空にすると周りのものを一通り出します。</string>
-    <string name="search_hint">山岳</string>
+    <string name="search_hint">検索ワード</string>
     <string name="search_clear">空にする</string>
     <string name="searching_for">「%1$s」を探します</string>
     <string name="search_cleared">周りのものを一通り出します</string>

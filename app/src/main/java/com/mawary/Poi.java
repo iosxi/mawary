@@ -8,7 +8,10 @@ package com.mawary;
 final class Poi {
 
     final String name;
+    /** The OSM tag value, e.g. "convenience"; or Google's type name. */
     final String kind;
+    /** The OSM tag key, e.g. "shop". Empty when the place came from Google. */
+    final String key;
     final double lat;
     final double lon;
 
@@ -26,7 +29,12 @@ final class Poi {
     float listSize;
 
     Poi(String name, String kind, double lat, double lon) {
+        this(name, "", kind, lat, lon);
+    }
+
+    Poi(String name, String key, String kind, double lat, double lon) {
         this.name = name;
+        this.key = key;
         this.kind = kind;
         this.lat = lat;
         this.lon = lon;
