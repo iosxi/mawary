@@ -45,9 +45,16 @@ final class WorldView extends View {
         void onRangeChanged(int radiusM);
         /** Long press: the user is asking for the API key prompt. */
         void onConfigureRequested();
+        /** The magnifier: the user wants to say what they are looking for. */
+        void onSearchTapped();
     }
 
-    private static final int[] RANGES = {100, 200, 500, 1000, 2000};
+    /**
+     * Ranges reach far enough to be useful with a search word: mountains are
+     * not 2 km away. Past WIDE_RADIUS the unfiltered sweep asks only for
+     * landmarks, so the far end stays answerable.
+     */
+    private static final int[] RANGES = {100, 200, 500, 1000, 2000, 5000, 10000};
 
     /** Half-width of the field of view. The screen spans exactly this each way. */
     private static final float SPAN = 90f;
@@ -60,15 +67,16 @@ final class WorldView extends View {
     private static final float BOW = 0.25f;
 
     private static final int MAX_FIELD_LABELS = 3;
-    private static final int MAX_LIST_ROWS = 2;
+    /** Deliberately not a whole number: a half row showing is what says "scroll me". */
+    private static final float LIST_ROWS = 3.5f;
 
     /** Below this the reading has not visibly changed, so there is nothing to redraw. */
     private static final float HEADING_EPS = 0.4f;
     private static final float TILT_EPS = 0.8f;
 
     /** The list shrinks a name to fit rather than cutting it, down to this floor. */
-    private static final float LIST_MAX_SP = 24f;
-    private static final float LIST_MIN_SP = 16f;
+    private static final float LIST_MAX_SP = 18f;
+    private static final float LIST_MIN_SP = 12f;
 
     private static final int COL_BG = 0xFF05080A;
     private static final int COL_GRID = 0xFF27525C;
@@ -105,6 +113,9 @@ final class WorldView extends View {
     /** Set while a finger is on the range slider, so taps elsewhere stay unclaimed. */
     private boolean sliding;
     private int slideStartIndex;
+    /** Set while a finger is dragging the list, or is down on the magnifier. */
+    private boolean scrolling, tapIcon;
+    private float lastTouchY;
 
     private final float dp;
 
@@ -117,17 +128,22 @@ final class WorldView extends View {
     private double myLat, myLon;
 
     private final List<Poi> places = new ArrayList<>();
+    /** Everything in the half-circle ahead, nearest first: what the list shows. */
     private final List<Poi> ahead = new ArrayList<>();
+    /** How far the list is scrolled, and what it would take to scroll it all. */
+    private float listScroll, listContentH, listViewH;
     private String source = "";
     private String status = "";
     private boolean permissionNeeded;
 
     private int rangeIndex = 3;   // 1000 m
+    private String query = "";
 
     // --- wording, read once: onDraw() must not touch resources ------------
     private final String sScanning, sNeedPermission, sAcquiring, sSearching;
     private final String sNothingAhead, sStandBy, sCalibrate, sHint, sFixOk;
     private final String rangeFmt, fixFmt;
+    private final String sSourceGoogle, sSourceOsm, sGoogleShort, sOsmShort;
 
     // --- cached labels ----------------------------------------------------
     private String headingLabel = "---";
@@ -136,6 +152,8 @@ final class WorldView extends View {
     private String rangeShort = "";
     private final String[] bandLabels = new String[BANDS.length];
     private String fixLabel;
+    /** Source and fix accuracy, joined once: the footer has no room to spare. */
+    private String footerRight = "";
 
     // --- geometry, resolved in layoutGeometry -----------------------------
     private float cx, pad;
@@ -145,6 +163,7 @@ final class WorldView extends View {
     private float compassRx, compassThick, compassCy;
     private float listTop, rowH, hintY;
     private float sliderX, sliderTop, sliderBottom, sliderHit;
+    private float iconCx, iconCy, iconR;
     private int insetTop, insetBottom;
 
     WorldView(Context ctx) {
@@ -166,7 +185,7 @@ final class WorldView extends View {
 
         Typeface mono = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD);
         text(pList, COL_TEXT, LIST_MAX_SP, mono);
-        text(pDist, COL_TEXT, 22f, mono);
+        text(pDist, COL_TEXT, 17f, mono);
         text(pName, COL_TARGET, 20f, mono);
         text(pSmall, COL_DIM, 16f, mono);
         text(pTiny, COL_DIM, 13f, mono);
@@ -183,6 +202,11 @@ final class WorldView extends View {
         rangeFmt = ctx.getString(R.string.range_fmt);
         fixFmt = ctx.getString(R.string.fix_fmt);
         fixLabel = ctx.getString(R.string.fix_none);
+        sSourceGoogle = ctx.getString(R.string.source_google);
+        sSourceOsm = ctx.getString(R.string.source_osm);
+        sGoogleShort = ctx.getString(R.string.source_google_short);
+        sOsmShort = ctx.getString(R.string.source_osm_short);
+        footerRight = sScanning + "  " + fixLabel;
 
         setRangeIndex(rangeIndex, false);
 
@@ -249,6 +273,7 @@ final class WorldView extends View {
         fixLabel = accuracyM > 0
                 ? String.format(java.util.Locale.US, fixFmt, (int) accuracyM)
                 : sFixOk;
+        footerRight = (source.isEmpty() ? sScanning : shortSource(source)) + "  " + fixLabel;
         relocateAll();
         postInvalidateOnAnimation();
     }
@@ -257,8 +282,23 @@ final class WorldView extends View {
         places.clear();
         if (found != null) places.addAll(found);
         source = src == null ? "" : src;
+        footerRight = (source.isEmpty() ? sScanning : shortSource(source)) + "  " + fixLabel;
+        listScroll = 0f;
         relocateAll();
         postInvalidateOnAnimation();
+    }
+
+    /** The word being searched for, shown where the range used to sit. */
+    void setQuery(String q) {
+        String next = q == null ? "" : q.trim();
+        if (next.equals(query)) return;
+        query = next;
+        listScroll = 0f;
+        postInvalidateOnAnimation();
+    }
+
+    String getQuery() {
+        return query;
     }
 
     void setStatus(String s) {
@@ -338,11 +378,50 @@ final class WorldView extends View {
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         int action = event.getActionMasked();
-        if (action == MotionEvent.ACTION_DOWN && event.getX() >= sliderHit) {
+        // The magnifier sits above the slider and inside its column, so it has
+        // to be asked first, and the slider only answers for its own height.
+        if (action == MotionEvent.ACTION_DOWN && inSearchIcon(event.getX(), event.getY())) {
+            tapIcon = true;
+            return true;
+        }
+        if (action == MotionEvent.ACTION_DOWN && event.getX() >= sliderHit
+                && event.getY() >= sliderTop - 24 * dp
+                && event.getY() <= sliderBottom + 24 * dp) {
             sliding = true;
             slideStartIndex = rangeIndex;
             getParent().requestDisallowInterceptTouchEvent(true);
             setRangeIndex(indexAt(event.getY()), false);
+            return true;
+        }
+        if (tapIcon) {
+            if (action == MotionEvent.ACTION_UP) {
+                tapIcon = false;
+                performClick();
+                if (inSearchIcon(event.getX(), event.getY()) && listener != null) {
+                    listener.onSearchTapped();
+                }
+            } else if (action == MotionEvent.ACTION_CANCEL) {
+                tapIcon = false;
+            }
+            return true;
+        }
+        if (action == MotionEvent.ACTION_DOWN && event.getY() >= listTop
+                && event.getY() <= listTop + listViewH && listContentH > listViewH) {
+            scrolling = true;
+            lastTouchY = event.getY();
+            getParent().requestDisallowInterceptTouchEvent(true);
+            return true;
+        }
+        if (scrolling) {
+            if (action == MotionEvent.ACTION_MOVE) {
+                float y = event.getY();
+                listScroll = clampScroll(listScroll - (y - lastTouchY));
+                lastTouchY = y;
+                postInvalidateOnAnimation();
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                scrolling = false;
+                performClick();
+            }
             return true;
         }
         if (sliding) {
@@ -360,6 +439,16 @@ final class WorldView extends View {
             return true;
         }
         return gestures.onTouchEvent(event) || super.onTouchEvent(event);
+    }
+
+    private boolean inSearchIcon(float x, float y) {
+        return Math.abs(x - iconCx) <= iconR * 2.4f && Math.abs(y - iconCy) <= iconR * 2.4f;
+    }
+
+    private float clampScroll(float v) {
+        float max = Math.max(0f, listContentH - listViewH);
+        if (v < 0f) return 0f;
+        return v > max ? max : v;
     }
 
     /** Which detent a finger at this height is asking for. Far is up, as on screen. */
@@ -410,22 +499,29 @@ final class WorldView extends View {
 
         statusY = insetTop + 26 * dp;
 
-        rowH = 40 * dp;
-        hintY = h - insetBottom - 18 * dp;
-        listTop = hintY - 26 * dp - MAX_LIST_ROWS * rowH;
+        rowH = 30 * dp;
+        listViewH = LIST_ROWS * rowH;
+        hintY = h - insetBottom - 12 * dp;
+        listTop = hintY - 28 * dp - listViewH;
 
-        compassRx = Math.min(w * 0.19f, 86 * dp);
-        compassThick = 17 * dp;
+        // Small. The compass is where you are, not what you came to look at;
+        // every dp it gives back is a dp of the thing being searched for.
+        compassRx = Math.min(w * 0.115f, 50 * dp);
+        compassThick = 11 * dp;
         // You stand at the centre of the compass, so that is where the ground
         // runs out. Seat it high enough that a fully open dial plus its rim
         // still clears the list below.
-        compassCy = listTop - 20 * dp - compassRx - compassThick;
+        compassCy = listTop - 16 * dp - compassRx - compassThick;
 
-        fieldTop = insetTop + 38 * dp;
+        fieldTop = insetTop + 34 * dp;
         fieldBottom = compassCy;
-        horizonBase = fieldTop + (fieldBottom - fieldTop) * 0.22f;
+        horizonBase = fieldTop + (fieldBottom - fieldTop) * 0.19f;
 
-        sliderTop = fieldTop + 30 * dp;
+        iconR = 9 * dp;
+        iconCx = w - pad - iconR - 3 * dp;
+        iconCy = insetTop + 20 * dp;
+
+        sliderTop = fieldTop + 26 * dp;
         sliderBottom = fieldBottom - 10 * dp;
 
         prepareLabels();
@@ -516,13 +612,24 @@ final class WorldView extends View {
     private void drawStatus(Canvas canvas, int w) {
         canvas.drawText(headingLabel, pad, statusY, pSmall);
 
-        pTiny.setTextAlign(Paint.Align.RIGHT);
-        canvas.drawText(source.isEmpty() ? sScanning : source, w - pad, statusY, pTiny);
-        pTiny.setTextAlign(Paint.Align.LEFT);
+        // What you asked for takes the middle when there is one; otherwise the
+        // range does, which is what you are implicitly asking for.
+        pSmall.setTextAlign(Paint.Align.CENTER);
+        pSmall.setColor(query.isEmpty() ? COL_DIM : COL_TARGET);
+        canvas.drawText(query.isEmpty() ? rangeLabel : query, cx - 6 * dp, statusY, pSmall);
+        pSmall.setColor(COL_DIM);
+        pSmall.setTextAlign(Paint.Align.LEFT);
 
-        pTiny.setTextAlign(Paint.Align.CENTER);
-        canvas.drawText(rangeLabel, cx, statusY, pTiny);
-        pTiny.setTextAlign(Paint.Align.LEFT);
+        drawSearchIcon(canvas);
+    }
+
+    /** A magnifier, lit when it is holding a word. */
+    private void drawSearchIcon(Canvas canvas) {
+        Paint paint = query.isEmpty() ? pRing : pTarget;
+        canvas.drawCircle(iconCx - iconR * 0.25f, iconCy - iconR * 0.25f, iconR * 0.8f, paint);
+        float k = iconR * 0.62f;
+        canvas.drawLine(iconCx + k * 0.45f, iconCy + k * 0.45f,
+                iconCx + iconR * 1.15f, iconCy + iconR * 1.15f, paint);
     }
 
     /** The ground plane: the horizon, the bearing marks on it, the distance bands. */
@@ -604,7 +711,9 @@ final class WorldView extends View {
             if (Math.abs(rel) > SPAN) continue;          // behind us: not our business
 
             boolean onAim = Math.abs(rel) <= AIM;
-            if (onAim) ahead.add(p);
+            // The list holds the whole half-circle, nearest first, so that
+            // scrolling it is worth doing; the aimed ones are simply lit up.
+            ahead.add(p);
 
             float u = (float) Math.sqrt(p.distM / range);
             float x = screenX(rel), y = groundY(u, rel, horizonY);
@@ -617,14 +726,17 @@ final class WorldView extends View {
 
         }
 
-        // Names last, so a neighbouring stake cannot be drawn over them.
-        int labels = Math.min(MAX_FIELD_LABELS, ahead.size());
-        for (int i = 0; i < labels; i++) {
+        // Names last, so a neighbouring stake cannot be drawn over them, and
+        // only for what is dead ahead: the rest would be a thicket.
+        int labels = 0;
+        for (int i = 0; i < ahead.size() && labels < MAX_FIELD_LABELS; i++) {
             Poi p = ahead.get(i);
             float rel = Geo.delta180(p.bearingDeg, headingDeg);
+            if (Math.abs(rel) > AIM) continue;
             float u = (float) Math.sqrt(p.distM / range);
             float x = screenX(rel), y = groundY(u, rel, horizonY);
             drawFieldLabel(canvas, p, x, y - 42 * dp, y - 25 * dp);
+            labels++;
         }
     }
 
@@ -752,33 +864,65 @@ final class WorldView extends View {
     }
 
     /** What is dead ahead, nearest first, in the size you can read while walking. */
+    /**
+     * What is in the half-circle ahead, nearest first, scrollable.
+     *
+     * <p>The viewport is deliberately three and a half rows tall: a row cut in
+     * half at the bottom edge is the plainest way to say there is more below.
+     * Only the rows that fall inside it are drawn, so a long list costs the
+     * same as a short one.
+     */
     private void drawList(Canvas canvas, int w, int h) {
-        canvas.drawLine(pad, listTop - 12 * dp, w - pad, listTop - 12 * dp, pGrid);
+        float top = listTop, bottom = listTop + listViewH;
+        canvas.drawLine(pad, top - 10 * dp, w - pad, top - 10 * dp, pGrid);
+
+        listContentH = ahead.size() * rowH;
+        listScroll = clampScroll(listScroll);
 
         if (ahead.isEmpty()) {
             pSmall.setColor(COL_DIM);
-            canvas.drawText(haveFix ? sNothingAhead : sStandBy, pad, listTop + 26 * dp, pSmall);
+            canvas.drawText(haveFix ? sNothingAhead : sStandBy, pad, top + 20 * dp, pSmall);
         } else {
-            int rows = Math.min(MAX_LIST_ROWS, ahead.size());
-            for (int i = 0; i < rows; i++) {
+            canvas.save();
+            canvas.clipRect(pad, top, w - pad, bottom);
+
+            int first = (int) (listScroll / rowH);
+            int last = Math.min(ahead.size(), first + (int) (LIST_ROWS + 2));
+            for (int i = first; i < last; i++) {
                 Poi p = ahead.get(i);
-                float y = listTop + 28 * dp + i * rowH;
-                boolean primary = i == 0;
+                float y = top + 20 * dp + i * rowH - listScroll;
 
                 float rel = Geo.delta180(p.bearingDeg, headingDeg);
+                boolean onAim = Math.abs(rel) <= AIM;
                 String arrow = rel < -3f ? "<" : (rel > 3f ? ">" : "|");
-                pDist.setColor(primary ? COL_TARGET : COL_DIM);
+
+                pDist.setColor(onAim ? COL_TARGET : COL_DIM);
                 canvas.drawText(arrow, pad, y, pDist);
 
                 pList.setTextSize(p.listSize);
-                pList.setColor(primary ? COL_TEXT : COL_DIM);
-                canvas.drawText(p.listLabel, pad + 30 * dp, y, pList);
+                pList.setColor(onAim ? COL_TEXT : COL_DIM);
+                canvas.drawText(p.listLabel, pad + 24 * dp, y, pList);
 
-                pDist.setColor(primary ? COL_TARGET : COL_DIM);
+                pDist.setColor(onAim ? COL_TARGET : COL_DIM);
                 pDist.setTextAlign(Paint.Align.RIGHT);
-                canvas.drawText(p.distLabel, w - pad, y, pDist);
+                canvas.drawText(p.distLabel, w - pad - 8 * dp, y, pDist);
                 pDist.setTextAlign(Paint.Align.LEFT);
                 pDist.setColor(COL_TEXT);
+            }
+            canvas.restore();
+
+            // A bar showing how much of the list is on screen, drawn only when
+            // some of it is not.
+            if (listContentH > listViewH) {
+                float trackX = w - pad;
+                float frac = listViewH / listContentH;
+                float thumb = Math.max(18 * dp, listViewH * frac);
+                float travel = listViewH - thumb;
+                float ty = top + travel * (listScroll / (listContentH - listViewH));
+                canvas.drawLine(trackX, top, trackX, bottom, pGrid);
+                pTarget.setStrokeWidth(3.5f * dp);
+                canvas.drawLine(trackX, ty, trackX, ty + thumb, pTarget);
+                pTarget.setStrokeWidth(2.4f * dp);
             }
         }
 
@@ -794,8 +938,15 @@ final class WorldView extends View {
         pTiny.setColor(COL_DIM);
         canvas.drawText(note, pad, hintY, pTiny);
         pTiny.setTextAlign(Paint.Align.RIGHT);
-        canvas.drawText(fixLabel, w - pad, hintY, pTiny);
+        canvas.drawText(footerRight, w - pad, hintY, pTiny);
         pTiny.setTextAlign(Paint.Align.LEFT);
+    }
+
+    /** The footer is narrow, so the source gets its short spelling there. */
+    private String shortSource(String src) {
+        if (src.equals(sSourceOsm)) return sOsmShort;
+        if (src.equals(sSourceGoogle)) return sGoogleShort;
+        return src;
     }
 
     /** Trims a label to fit, in whole characters. Called when data changes, not per frame. */

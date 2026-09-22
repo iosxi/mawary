@@ -234,6 +234,41 @@ public final class MainActivity extends Activity
     }
 
     @Override
+    public void onSearchTapped() {
+        final EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_TEXT);
+        input.setSingleLine(true);
+        input.setHint(R.string.search_hint);
+        input.setText(places.getQuery());
+        input.setSelection(input.getText().length());
+        input.setTextColor(Color.WHITE);
+
+        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog)
+                .setTitle(R.string.search_title)
+                .setMessage(R.string.search_message)
+                .setView(input)
+                .setPositiveButton(android.R.string.ok,
+                        (d, which) -> applyQuery(input.getText().toString()))
+                .setNeutralButton(R.string.search_clear, (d, which) -> applyQuery(""))
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    private void applyQuery(String raw) {
+        String q = raw == null ? "" : raw.trim();
+        places.setQuery(q);
+        view.setQuery(q);
+        view.setPlaces(null, "");
+        if (lastFix != null) {
+            places.requestAround(lastFix.getLatitude(), lastFix.getLongitude(), view.getRangeM());
+        }
+        Toast.makeText(this,
+                q.isEmpty() ? getString(R.string.search_cleared)
+                        : getString(R.string.searching_for, q),
+                Toast.LENGTH_SHORT).show();
+    }
+
+    @Override
     public void onConfigureRequested() {
         final SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         final EditText input = new EditText(this);
@@ -267,22 +302,22 @@ public final class MainActivity extends Activity
 
     private void goFullscreen() {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        // Edge to edge, but the navigation bar stays: hiding it took away the
+        // back and home buttons, and the strip it occupies was never where the
+        // useful part of the screen was. Only the status bar is reclaimed.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             getWindow().setDecorFitsSystemWindows(false);
             WindowInsetsController c = getWindow().getInsetsController();
             if (c != null) {
-                c.hide(WindowInsets.Type.systemBars());
+                c.hide(WindowInsets.Type.statusBars());
                 c.setSystemBarsBehavior(
                         WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
             }
         } else {
             getWindow().getDecorView().setSystemUiVisibility(
                     View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                             | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+                            | View.SYSTEM_UI_FLAG_FULLSCREEN);
         }
     }
 }

@@ -85,10 +85,67 @@ final class PlaceRepository {
 
     private final Runnable retry = this::retryLast;
 
+    /**
+     * Beyond this radius the unfiltered search stops asking for every shop and
+     * asks only for things you could see from that far: a corner shop 8 km away
+     * is not a landmark, and a city's worth of them is a query Overpass will
+     * refuse to finish.
+     */
+    private static final int WIDE_RADIUS = 3000;
+
+    /**
+     * What a search word means in map tags. A search that only matched names
+     * would be useless for the obvious cases: nobody types the name of the
+     * mountain they are trying to find. Anything not listed here falls through
+     * to a regular-expression search over names, which Overpass does natively.
+     */
+    private static final String[][] TOPICS = {
+            {"\u5c71\u5cb3|\u5c71|\u5cf0|peak|mountain", "natural=peak", "natural=volcano"},
+            {"\u99c5|\u9244\u9053|station", "railway=station", "railway=halt"},
+            {"\u30b3\u30f3\u30d3\u30cb|konbini", "shop=convenience"},
+            {"\u5e97|\u8cb7\u3044\u7269|\u30b7\u30e7\u30c3\u30d7|shop", "shop"},
+            {"\u98df\u4e8b|\u30ec\u30b9\u30c8\u30e9\u30f3|\u98ef|\u98df\u5802|restaurant",
+                    "amenity=restaurant", "amenity=fast_food"},
+            {"\u30ab\u30d5\u30a7|\u55ab\u8336|cafe", "amenity=cafe"},
+            {"\u516c\u5712|park", "leisure=park"},
+            {"\u5b66\u6821|\u5927\u5b66|school", "amenity=school", "amenity=university"},
+            {"\u75c5\u9662|\u533b\u9662|\u30af\u30ea\u30cb\u30c3\u30af|hospital",
+                    "amenity=hospital", "amenity=clinic"},
+            {"\u5bfa|\u795e\u793e|\u6559\u4f1a|temple|shrine", "amenity=place_of_worship"},
+            {"\u6e29\u6cc9|\u9280\u6e6f|onsen", "natural=hot_spring", "amenity=public_bath"},
+            {"\u30db\u30c6\u30eb|\u5bbf|\u65c5\u9928|hotel", "tourism=hotel", "tourism=guest_house"},
+            {"\u9280\u884c|bank", "amenity=bank"},
+            {"\u90f5\u4fbf|post", "amenity=post_office"},
+            {"\u30c8\u30a4\u30ec|toilet", "amenity=toilets"},
+            {"\u5ddd|\u6cb3|river", "waterway=river"},
+            {"\u6e56|\u6c60|lake", "natural=water"},
+            {"\u57ce|castle", "historic=castle"},
+            {"\u5cf6|island", "place=island"},
+            {"\u89b3\u5149|\u540d\u6240|sight", "tourism=attraction", "tourism=viewpoint"},
+    };
+
+    /** What a wide, unfiltered sweep looks for. */
+    private static final String[] LANDMARKS = {
+            "natural=peak", "natural=volcano", "railway=station",
+            "tourism=attraction", "tourism=viewpoint", "historic=castle",
+            "amenity=hospital", "amenity=university",
+    };
+
     private final Context ctx;
     private final String sourceGoogle, sourceOsm;
 
     private String apiKey;
+    private String query = "";
+
+    /**
+     * A request that arrived while another was still out. Typing a search word
+     * during a slow Overpass round trip used to drop the search on the floor,
+     * leaving the old, unfiltered answer on screen with the new word in the
+     * title bar. Hold it and run it the moment the line is free.
+     */
+    private boolean pending;
+    private double pendLat, pendLon;
+    private int pendRadius;
     private volatile boolean inFlight;
     private double lastLat = Double.NaN, lastLon = Double.NaN;
     private int lastRadius;
@@ -102,6 +159,16 @@ final class PlaceRepository {
         this.sourceOsm = ctx.getString(R.string.source_osm);
     }
 
+    /** The word the user is looking for, or empty for "whatever is around". */
+    void setQuery(String q) {
+        query = q == null ? "" : q.trim();
+        invalidate();
+    }
+
+    String getQuery() {
+        return query;
+    }
+
     void setApiKey(String key) {
         apiKey = key == null ? "" : key.trim();
         invalidate();
@@ -111,6 +178,11 @@ final class PlaceRepository {
     void invalidate() {
         lastLat = Double.NaN;
         lastFetchMs = 0L;
+    }
+
+    /** Lower case, so a topic is found whether it was typed Station or station. */
+    private static String fold(String q) {
+        return q.toLowerCase(Locale.US);
     }
 
     void shutdown() {
@@ -133,7 +205,11 @@ final class PlaceRepository {
      */
     void requestAround(double lat, double lon, int radiusM) {
         if (inFlight) {
-            Log.i(TAG, "requestAround: skipped, one already in flight");
+            pending = true;
+            pendLat = lat;
+            pendLon = lon;
+            pendRadius = radiusM;
+            Log.i(TAG, "requestAround: held until the one in flight finishes");
             return;
         }
         long now = System.currentTimeMillis();
@@ -188,6 +264,11 @@ final class PlaceRepository {
                     + " count=" + (result == null ? -1 : result.size()) + " status=" + status);
             main.post(() -> {
                 inFlight = false;
+                if (pending) {
+                    pending = false;
+                    invalidate();
+                    requestAround(pendLat, pendLon, pendRadius);
+                }
                 if (gen != generation.get()) return;    // superseded by a newer request
                 if (msg != null) listener.onStatus(msg);
                 if (out != null) {
@@ -214,12 +295,24 @@ final class PlaceRepository {
         JSONObject center = new JSONObject().put("latitude", lat).put("longitude", lon);
         JSONObject circle = new JSONObject().put("center", center).put("radius", (double) radiusM);
         JSONObject body = new JSONObject()
-                .put("locationRestriction", new JSONObject().put("circle", circle))
-                .put("maxResultCount", 20)
-                .put("rankPreference", "DISTANCE")
                 .put("languageCode", Locale.getDefault().getLanguage());
 
-        HttpURLConnection c = open("https://places.googleapis.com/v1/places:searchNearby");
+        // Nearby Search cannot take a word, so a search goes to Text Search and
+        // leans on the same circle as a bias rather than a hard restriction.
+        String url;
+        if (query.isEmpty()) {
+            url = "https://places.googleapis.com/v1/places:searchNearby";
+            body.put("locationRestriction", new JSONObject().put("circle", circle))
+                    .put("maxResultCount", 20)
+                    .put("rankPreference", "DISTANCE");
+        } else {
+            url = "https://places.googleapis.com/v1/places:searchText";
+            body.put("textQuery", query)
+                    .put("locationBias", new JSONObject().put("circle", circle))
+                    .put("maxResultCount", 20);
+        }
+
+        HttpURLConnection c = open(url);
         c.setRequestMethod("POST");
         c.setRequestProperty("Content-Type", "application/json");
         c.setRequestProperty("X-Goog-Api-Key", apiKey);
@@ -274,17 +367,7 @@ final class PlaceRepository {
     private List<Poi> fetchOverpass(String endpoint, double lat, double lon, int radiusM)
             throws Exception {
         String around = String.format(Locale.US, "around:%d,%.6f,%.6f", radiusM, lat, lon);
-        String q = "[out:json][timeout:20];("
-                + "node(" + around + ")[name][amenity];"
-                + "node(" + around + ")[name][shop];"
-                + "node(" + around + ")[name][tourism];"
-                + "node(" + around + ")[name][leisure];"
-                + "node(" + around + ")[name][office];"
-                + "node(" + around + ")[name][railway=station];"
-                + "way(" + around + ")[name][amenity];"
-                + "way(" + around + ")[name][shop];"
-                + "way(" + around + ")[name][tourism];"
-                + "way(" + around + ")[name][leisure];"
+        String q = "[out:json][timeout:20];(" + overpassBody(around, radiusM)
                 + ");out center " + OVERPASS_LIMIT + ";";
 
         HttpURLConnection c = open(endpoint);
@@ -322,6 +405,74 @@ final class PlaceRepository {
             out.add(new Poi(name, kind, elat, elon));
         }
         return nearest(out, lat, lon);
+    }
+
+    /** The statements that go inside the Overpass union, given what was asked for. */
+    private String overpassBody(String around, int radiusM) {
+        StringBuilder b = new StringBuilder(512);
+        if (!query.isEmpty()) {
+            String[] tags = topicFor(query);
+            if (tags != null) {
+                for (String tag : tags) both(b, around, tag);
+            } else {
+                // Not a topic we know, so search the names themselves. Overpass
+                // matches these as regular expressions, which means the word has
+                // to be handed over with its metacharacters defused.
+                String re = escapeRegex(query);
+                b.append("node(").append(around).append(")[name~\"").append(re)
+                        .append("\"];");
+                b.append("way(").append(around).append(")[name~\"").append(re)
+                        .append("\"];");
+            }
+            return b.toString();
+        }
+
+        if (radiusM > WIDE_RADIUS) {
+            for (String tag : LANDMARKS) both(b, around, tag);
+            return b.toString();
+        }
+
+        for (String key : new String[]{"amenity", "shop", "tourism", "leisure", "office"}) {
+            b.append("node(").append(around).append(")[name][").append(key).append("];");
+        }
+        b.append("node(").append(around).append(")[name][railway=station];");
+        for (String key : new String[]{"amenity", "shop", "tourism", "leisure"}) {
+            b.append("way(").append(around).append(")[name][").append(key).append("];");
+        }
+        return b.toString();
+    }
+
+    /** The same filter asked of both nodes and ways; a shop can be either. */
+    private static void both(StringBuilder b, String around, String tag) {
+        b.append("node(").append(around).append(")[name][").append(tag).append("];");
+        b.append("way(").append(around).append(")[name][").append(tag).append("];");
+    }
+
+    /** The tags a search word stands for, or null if it is just a word. */
+    private static String[] topicFor(String raw) {
+        String q = fold(raw);
+        for (String[] row : TOPICS) {
+            for (String word : row[0].split("\\|")) {
+                if (q.contains(word)) {
+                    String[] tags = new String[row.length - 1];
+                    System.arraycopy(row, 1, tags, 0, tags.length);
+                    return tags;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static final String SPECIALS = "\\^$.|?*+()[]{}";
+
+    private static String escapeRegex(String s) {
+        StringBuilder b = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (SPECIALS.indexOf(c) >= 0 || c == '\"') b.append('\\');
+            b.append(c);
+        }
+        return b.toString();
     }
 
     /**

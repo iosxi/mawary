@@ -23,16 +23,27 @@
     <string name="nothing_ahead">正面には何もありません。体を回してください</string>
     <string name="stand_by">準備中</string>
     <string name="calibrate">方位が未校正です。8 の字に振ってください</string>
-    <string name="hint">右の目盛り: 範囲　長押し: API キー</string>
+    <string name="hint">虫眼鏡: 検索　長押し: API キー</string>
 
     <!-- 取得結果 -->
     <string name="source_google">Google マップ</string>
     <string name="source_osm">OpenStreetMap</string>
+    <!-- 脚注は横幅が足りないので短い綴りを使う -->
+    <string name="source_google_short">Google</string>
+    <string name="source_osm_short">OSM</string>
     <string name="none_in_range">範囲内に何もありません</string>
     <string name="err_google">Google: %1$s</string>
     <string name="err_osm">OSM: %1$s</string>
     <string name="no_compass">この端末には方位センサがありません</string>
     <string name="location_denied">位置情報が許可されていません</string>
+
+    <!-- 検索 -->
+    <string name="search_title">何を探しますか</string>
+    <string name="search_message">「山岳」「駅」「コンビニ」のような言葉か、店名の一部を入れてください。空にすると周りのものを一通り出します。</string>
+    <string name="search_hint">山岳</string>
+    <string name="search_clear">空にする</string>
+    <string name="searching_for">「%1$s」を探します</string>
+    <string name="search_cleared">周りのものを一通り出します</string>
 
     <!-- API キーの入力 -->
     <string name="api_key_title">Google Places API キー</string>
