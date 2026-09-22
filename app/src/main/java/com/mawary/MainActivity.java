@@ -17,6 +17,7 @@ import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.Toast;
 
@@ -244,11 +245,8 @@ public final class MainActivity extends Activity
         input.setHintTextColor(0x66FFFFFF);
         input.setText(places.getQuery());
         input.setTextColor(Color.WHITE);
-        // Coming back to change the word almost always means replacing it, so
-        // open with the old one selected and let the first keystroke clear it.
-        input.selectAll();
 
-        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog)
+        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog)
                 .setTitle(R.string.search_title)
                 .setMessage(R.string.search_message)
                 .setView(input)
@@ -256,7 +254,34 @@ public final class MainActivity extends Activity
                         (d, which) -> applyQuery(input.getText().toString()))
                 .setNeutralButton(R.string.search_clear, (d, which) -> applyQuery(""))
                 .setNegativeButton(android.R.string.cancel, null)
-                .show();
+                .create();
+        openForTyping(dialog, input);
+    }
+
+    /**
+     * Opens a prompt ready to be typed into: focused, keyboard already up, and
+     * whatever was in the box selected.
+     *
+     * <p>Selecting the text is not enough on its own. An unfocused field draws
+     * no selection, so there is nothing to see, and with no keyboard the only
+     * way to get one is to tap the field — which puts a caret where the finger
+     * landed and throws the selection away. Raising the keyboard for them is
+     * what makes the selection both visible and worth having.
+     */
+    private void openForTyping(AlertDialog dialog, EditText input) {
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        }
+        dialog.show();
+        input.requestFocus();
+        input.selectAll();
+        // Some keyboards ignore the window flag, so ask once the view is laid out.
+        input.post(() -> {
+            InputMethodManager imm = getSystemService(InputMethodManager.class);
+            if (imm != null) imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+            input.selectAll();
+        });
     }
 
     private void applyQuery(String raw) {
@@ -283,7 +308,7 @@ public final class MainActivity extends Activity
         input.setText(prefs.getString(KEY_API, ""));
         input.setTextColor(Color.WHITE);
 
-        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog)
+        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog)
                 .setTitle(R.string.api_key_title)
                 .setMessage(R.string.api_key_message)
                 .setView(input)
@@ -300,7 +325,8 @@ public final class MainActivity extends Activity
                             Toast.LENGTH_SHORT).show();
                 })
                 .setNegativeButton(android.R.string.cancel, null)
-                .show();
+                .create();
+        openForTyping(dialog, input);
     }
 
     // ------------------------------------------------------------ chrome

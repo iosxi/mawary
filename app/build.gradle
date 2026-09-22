@@ -27,8 +27,8 @@ android {
         applicationId "com.mawary"
         minSdk 28          // Android 9 (Pie)
         targetSdk 36       // Android 16
-        versionCode 6
-        versionName "1.5"
+        versionCode 7
+        versionName "1.6"
         buildConfigField "String", "PLACES_API_KEY", "\"${placesKey}\""
         resConfigs "ja", "en"
     }
