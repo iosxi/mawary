@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -13,16 +14,12 @@ import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
-import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.SeekBar;
-import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.List;
@@ -44,11 +41,9 @@ public final class MainActivity extends Activity
     private static final long LOC_MIN_MS = 4000L;
     private static final float LOC_MIN_M = 12f;
 
-    private static final String PREFS = "mawary";
-    private static final String KEY_API = "places_api_key";
-    private static final String KEY_LABEL_TRANSPARENCY = "label_transparency";
-    /** The transparency slider moves in steps of this many percent. */
-    private static final int TRANSPARENCY_STEP = 5;
+    static final String PREFS = "mawary";
+    static final String KEY_API = "places_api_key";
+    static final String KEY_LABEL_TRANSPARENCY = "label_transparency";
 
     private WorldView view;
     private Heading heading;
@@ -68,6 +63,10 @@ public final class MainActivity extends Activity
      * business on the main thread in the middle of a gesture.
      */
     private Location lastFix;
+    /** Where the places on screen came from, for the settings screen to report. */
+    private String lastSource = "";
+    /** The key the repository is using, so a resume can tell whether it changed. */
+    private String appliedKey;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -88,6 +87,7 @@ public final class MainActivity extends Activity
         }
 
         places = new PlaceRepository(this, apiKey(), this);
+        appliedKey = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_API, "");
         locations = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
     }
 
@@ -106,6 +106,7 @@ public final class MainActivity extends Activity
     protected void onResume() {
         super.onResume();
         heading.start();
+        applySettings();
         if (hasLocationPermission()) {
             view.setPermissionNeeded(false);
             startTracking();
@@ -208,8 +209,7 @@ public final class MainActivity extends Activity
     @Override
     public void onLocationChanged(Location location) {
         lastFix = location;
-        view.setOrigin(location.getLatitude(), location.getLongitude(),
-                location.hasAccuracy() ? location.getAccuracy() : 0f);
+        view.setOrigin(location.getLatitude(), location.getLongitude());
         places.requestAround(location.getLatitude(), location.getLongitude(), view.getRangeM());
     }
 
@@ -227,7 +227,8 @@ public final class MainActivity extends Activity
 
     @Override
     public void onPlaces(List<Poi> found, String source) {
-        view.setPlaces(found, source);
+        view.setPlaces(found);
+        lastSource = source == null ? "" : source;
         if (found.isEmpty()) view.setStatus(getString(R.string.none_in_range));
         else view.setStatus("");
     }
@@ -301,7 +302,7 @@ public final class MainActivity extends Activity
         String q = raw == null ? "" : raw.trim();
         places.setQuery(q);
         view.setQuery(q);
-        view.setPlaces(null, "");
+        view.setPlaces(null);
         if (lastFix != null) {
             places.requestAround(lastFix.getLatitude(), lastFix.getLongitude(), view.getRangeM());
         }
@@ -311,111 +312,31 @@ public final class MainActivity extends Activity
                 Toast.LENGTH_SHORT).show();
     }
 
-    /** Long press: a short menu of the few things there are to set. */
+    /** The gear: a full screen of settings, told what the main screen knows. */
     @Override
-    public void onConfigureRequested() {
-        String[] items = {
-                getString(R.string.settings_transparency_item, labelTransparency()),
-                getString(R.string.api_key_title),
-        };
-        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog)
-                .setTitle(R.string.settings_title)
-                .setItems(items, (d, which) -> {
-                    if (which == 0) openTransparency();
-                    else openApiKey();
-                })
-                .show();
+    public void onSettingsTapped() {
+        Intent i = new Intent(this, SettingsActivity.class);
+        i.putExtra(SettingsActivity.EXTRA_SOURCE, lastSource);
+        i.putExtra(SettingsActivity.EXTRA_ACCURACY,
+                lastFix == null ? -1f : lastFix.hasAccuracy() ? lastFix.getAccuracy() : 0f);
+        startActivity(i);
     }
 
     /**
-     * How see-through the label backgrounds are. The labels change as the
-     * slider moves, and the dialog sits at the bottom without dimming the
-     * screen, so what it does is visible while choosing.
+     * Picks up whatever the settings screen changed. Called on every resume,
+     * which is cheap, and means there is no result to hand back and forth.
      */
-    private void openTransparency() {
-        final SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        final int before = labelTransparency();
-        float dp = getResources().getDisplayMetrics().density;
-
-        final TextView value = new TextView(this);
-        value.setTextColor(Color.WHITE);
-        value.setTextSize(18f);
-        value.setGravity(Gravity.CENTER);
-        value.setText(getString(R.string.percent_fmt, before));
-
-        final SeekBar bar = new SeekBar(this);
-        bar.setMax(100 / TRANSPARENCY_STEP);
-        bar.setProgress(before / TRANSPARENCY_STEP);
-        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
-                int pct = progress * TRANSPARENCY_STEP;
-                value.setText(getString(R.string.percent_fmt, pct));
-                view.setLabelTransparency(pct);
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar s) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar s) {
-            }
-        });
-
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int side = (int) (20 * dp);
-        box.setPadding(side, (int) (8 * dp), side, 0);
-        box.addView(value);
-        box.addView(bar);
-
-        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog)
-                .setTitle(R.string.transparency_title)
-                .setMessage(R.string.transparency_message)
-                .setView(box)
-                .setPositiveButton(android.R.string.ok, (d, which) ->
-                        prefs.edit().putInt(KEY_LABEL_TRANSPARENCY,
-                                bar.getProgress() * TRANSPARENCY_STEP).apply())
-                .setNegativeButton(android.R.string.cancel, (d, which) ->
-                        view.setLabelTransparency(before))
-                .setOnCancelListener(d -> view.setLabelTransparency(before))
-                .create();
-        dialog.show();
-        if (dialog.getWindow() != null) {
-            dialog.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            dialog.getWindow().setGravity(Gravity.BOTTOM);
+    private void applySettings() {
+        view.setLabelTransparency(labelTransparency());
+        String stored = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_API, "");
+        if (stored.equals(appliedKey)) return;
+        appliedKey = stored;
+        places.setApiKey(stored.isEmpty() ? BuildConfig.PLACES_API_KEY : stored);
+        if (lastFix != null) {
+            places.requestAround(lastFix.getLatitude(), lastFix.getLongitude(), view.getRangeM());
         }
-    }
-
-    private void openApiKey() {
-        final SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        final EditText input = new EditText(this);
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        input.setSingleLine(true);
-        input.setHint("AIza...");
-        input.setText(prefs.getString(KEY_API, ""));
-        input.setTextColor(Color.WHITE);
-
-        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog)
-                .setTitle(R.string.api_key_title)
-                .setMessage(R.string.api_key_message)
-                .setView(input)
-                .setPositiveButton(android.R.string.ok, (d, which) -> {
-                    String key = input.getText().toString().trim();
-                    prefs.edit().putString(KEY_API, key).apply();
-                    places.setApiKey(key.isEmpty() ? BuildConfig.PLACES_API_KEY : key);
-                    if (lastFix != null) {
-                        places.requestAround(lastFix.getLatitude(), lastFix.getLongitude(),
-                                view.getRangeM());
-                    }
-                    Toast.makeText(this,
-                            key.isEmpty() ? R.string.using_osm : R.string.using_google,
-                            Toast.LENGTH_SHORT).show();
-                })
-                .setNegativeButton(android.R.string.cancel, null)
-                .create();
-        openForTyping(dialog, input);
+        Toast.makeText(this, stored.isEmpty() ? R.string.using_osm : R.string.using_google,
+                Toast.LENGTH_SHORT).show();
     }
 
     // ------------------------------------------------------------ chrome

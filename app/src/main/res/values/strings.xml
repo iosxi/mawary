@@ -8,10 +8,12 @@
 
     <!-- 画面上部 -->
     <string name="range_fmt">範囲 %1$s</string>
+
+    <!-- 設定画面の下の情報欄 -->
     <string name="source_scanning">探索中</string>
-    <string name="fix_none">測位なし</string>
-    <string name="fix_fmt">測位 ±%1$dm</string>
-    <string name="fix_ok">測位 OK</string>
+    <string name="fix_none">なし</string>
+    <string name="fix_fmt">±%1$dm</string>
+    <string name="fix_ok">取得済み</string>
 
     <!-- 視界の中央に出る状態表示 -->
     <string name="need_permission">位置情報の許可が必要です</string>
@@ -24,14 +26,10 @@
     <string name="nothing_ahead">正面には何もありません。体を回してください</string>
     <string name="stand_by">準備中</string>
     <string name="calibrate">方位が未校正です。8 の字に振ってください</string>
-    <string name="hint">虫眼鏡: 検索　長押し: 設定</string>
 
     <!-- 取得結果 -->
     <string name="source_google">Google マップ</string>
     <string name="source_osm">OpenStreetMap</string>
-    <!-- 脚注は横幅が足りないので短い綴りを使う -->
-    <string name="source_google_short">Google</string>
-    <string name="source_osm_short">OSM</string>
     <string name="none_in_range">見つかりません。範囲を広げるか、別の言葉で</string>
     <string name="err_google">Google: %1$s</string>
     <string name="err_osm">OSM: %1$s</string>
@@ -47,12 +45,19 @@
     <string name="searching_for">「%1$s」を探します</string>
     <string name="search_cleared">周りのものを一通り出します</string>
 
-    <!-- 設定（長押し） -->
+    <!-- 設定画面 -->
     <string name="settings_title">設定</string>
-    <string name="settings_transparency_item">ラベルの透過度（%1$d%%）</string>
+    <string name="back">戻る</string>
+    <string name="section_display">表示</string>
+    <string name="section_search">検索</string>
     <string name="transparency_title">ラベルの透過度</string>
-    <string name="transparency_message">名前の札の地をどれだけ透かすか。0% で不透明、100% で地なし。動かすとその場で変わります。</string>
+    <string name="transparency_message">名前の札の地をどれだけ透かすか。0% で不透明、100% で地なし。下の見本がその場で変わります。</string>
     <string name="percent_fmt">%1$d%%</string>
+    <string name="preview_name">見本公園</string>
+    <string name="preview_dist">120m</string>
+    <string name="info_source">情報源</string>
+    <string name="info_fix">測位</string>
+    <string name="info_version">バージョン</string>
 
     <!-- API キーの入力 -->
     <string name="api_key_title">Google Places API キー</string>

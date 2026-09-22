@@ -9,7 +9,6 @@ import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.hardware.SensorManager;
 import android.os.Build;
-import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowInsets;
@@ -43,10 +42,10 @@ final class WorldView extends View {
     interface Listener {
         /** The user cycled the range; time to widen or narrow the search. */
         void onRangeChanged(int radiusM);
-        /** Long press: the user is asking for the settings. */
-        void onConfigureRequested();
         /** The magnifier: the user wants to say what they are looking for. */
         void onSearchTapped();
+        /** The gear: the user wants the settings screen. */
+        void onSettingsTapped();
     }
 
     /**
@@ -99,6 +98,9 @@ final class WorldView extends View {
 
     /** Label backgrounds are the night sky; how much of what is behind shows is a setting. */
     private static final int COL_LABEL_BG = 0x0005080A;
+    /** A button's face, and its face while a finger is on it. */
+    private static final int COL_BUTTON = 0xFF0E1B1F;
+    private static final int COL_BUTTON_DOWN = 0xFF1F4148;
     static final int DEFAULT_LABEL_TRANSPARENCY = 66;
     /** Deliberately not a whole number: a half row showing is what says "scroll me". */
     private static final float LIST_ROWS = 3.5f;
@@ -111,15 +113,15 @@ final class WorldView extends View {
     private static final float LIST_MAX_SP = 18f;
     private static final float LIST_MIN_SP = 12f;
 
-    private static final int COL_BG = 0xFF05080A;
-    private static final int COL_GRID = 0xFF27525C;
+    static final int COL_BG = 0xFF05080A;
+    static final int COL_GRID = 0xFF27525C;
     /** Label outlines: a step up from the grid, so a bubble stands off the ground lines. */
-    private static final int COL_BUBBLE = 0xFF3F818A;
-    private static final int COL_MID = 0xFF49A0A6;
+    static final int COL_BUBBLE = 0xFF3F818A;
+    static final int COL_MID = 0xFF49A0A6;
     private static final int COL_ACCENT = 0xFF5CF0D8;
-    private static final int COL_TARGET = 0xFFFFC46B;
-    private static final int COL_TEXT = 0xFFE2FAF6;
-    private static final int COL_DIM = 0xFFA6CFD0;
+    static final int COL_TARGET = 0xFFFFC46B;
+    static final int COL_TEXT = 0xFFE2FAF6;
+    static final int COL_DIM = 0xFFA6CFD0;
     /** North is red here for the same reason it is red on a real compass. */
     private static final int COL_NORTH = 0xFFFF5A5A;
     private static final int COL_SOUTH = 0xFF93ADAD;
@@ -138,6 +140,8 @@ final class WorldView extends View {
     private final Paint pTiny = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pLabelBg = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pBubble = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pButton = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pNotice = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final Path path = new Path();
     /** A label's tail, before it is merged into the bubble. */
@@ -160,14 +164,16 @@ final class WorldView extends View {
     /** Font metrics for the two lines of a label, read once. */
     private float nameAsc, nameDesc, distAsc, distDesc;
     private final RectF oval = new RectF();
-    private final GestureDetector gestures;
     private Listener listener;
 
     /** Set while a finger is on the range slider, so taps elsewhere stay unclaimed. */
     private boolean sliding;
     private int slideStartIndex;
-    /** Set while a finger is dragging the list, or is down on the magnifier. */
-    private boolean scrolling, tapIcon;
+    /** Set while a finger is dragging the list. */
+    private boolean scrolling;
+    /** Which button a finger went down on: BTN_NONE, BTN_SEARCH or BTN_SETTINGS. */
+    private int pressed = BTN_NONE;
+    private static final int BTN_NONE = 0, BTN_SEARCH = 1, BTN_SETTINGS = 2;
     private float lastTouchY;
 
     private final float dp;
@@ -185,7 +191,6 @@ final class WorldView extends View {
     private final List<Poi> ahead = new ArrayList<>();
     /** How far the list is scrolled, and what it would take to scroll it all. */
     private float listScroll, listContentH, listViewH;
-    private String source = "";
     private String status = "";
     private boolean permissionNeeded;
 
@@ -193,10 +198,9 @@ final class WorldView extends View {
     private String query = "";
 
     // --- wording, read once: onDraw() must not touch resources ------------
-    private final String sScanning, sNeedPermission, sAcquiring, sSearching;
-    private final String sNothingAhead, sStandBy, sCalibrate, sHint, sFixOk;
-    private final String rangeFmt, fixFmt;
-    private final String sSourceGoogle, sSourceOsm, sGoogleShort, sOsmShort;
+    private final String sNeedPermission, sAcquiring, sSearching;
+    private final String sNothingAhead, sStandBy, sCalibrate;
+    private final String rangeFmt;
 
     // --- cached labels ----------------------------------------------------
     private String headingLabel = "---";
@@ -204,9 +208,6 @@ final class WorldView extends View {
     private String rangeLabel = "";
     private String rangeShort = "";
     private final String[] bandLabels = new String[BANDS.length];
-    private String fixLabel;
-    /** Source and fix accuracy, joined once: the footer has no room to spare. */
-    private String footerRight = "";
 
     // --- geometry, resolved in layoutGeometry -----------------------------
     private float cx, pad;
@@ -214,9 +215,10 @@ final class WorldView extends View {
     private float fieldTop, fieldBottom, horizonBase;
     private float halfSpanPx;
     private float compassRx, compassThick, compassCy;
-    private float listTop, rowH, hintY;
+    private float listTop, rowH;
     private float sliderX, sliderTop, sliderBottom, sliderHit;
-    private float iconCx, iconCy, iconR;
+    /** The two buttons, top right: search, then settings to its right. */
+    private final RectF searchBtn = new RectF(), settingsBtn = new RectF();
     private int insetTop, insetBottom;
 
     WorldView(Context ctx) {
@@ -253,38 +255,19 @@ final class WorldView extends View {
         stroke(pBubble, COL_BUBBLE, 1.4f);
         // Round, so the tail's sharp point does not grow a miter spike past the stake.
         pBubble.setStrokeJoin(Paint.Join.ROUND);
+        pButton.setStyle(Paint.Style.FILL);
+        pNotice.setStyle(Paint.Style.FILL);
+        pNotice.setColor(0xE605080A);
 
-        sScanning = ctx.getString(R.string.source_scanning);
         sNeedPermission = ctx.getString(R.string.need_permission);
         sAcquiring = ctx.getString(R.string.acquiring);
         sSearching = ctx.getString(R.string.searching);
         sNothingAhead = ctx.getString(R.string.nothing_ahead);
         sStandBy = ctx.getString(R.string.stand_by);
         sCalibrate = ctx.getString(R.string.calibrate);
-        sHint = ctx.getString(R.string.hint);
-        sFixOk = ctx.getString(R.string.fix_ok);
         rangeFmt = ctx.getString(R.string.range_fmt);
-        fixFmt = ctx.getString(R.string.fix_fmt);
-        fixLabel = ctx.getString(R.string.fix_none);
-        sSourceGoogle = ctx.getString(R.string.source_google);
-        sSourceOsm = ctx.getString(R.string.source_osm);
-        sGoogleShort = ctx.getString(R.string.source_google_short);
-        sOsmShort = ctx.getString(R.string.source_osm_short);
-        footerRight = sScanning + "  " + fixLabel;
 
         setRangeIndex(rangeIndex, false);
-
-        gestures = new GestureDetector(ctx, new GestureDetector.SimpleOnGestureListener() {
-            @Override
-            public boolean onDown(MotionEvent e) {
-                return true;
-            }
-
-            @Override
-            public void onLongPress(MotionEvent e) {
-                if (listener != null) listener.onConfigureRequested();
-            }
-        });
     }
 
     private void stroke(Paint p, int color, float widthDp) {
@@ -330,23 +313,17 @@ final class WorldView extends View {
         postInvalidateOnAnimation();
     }
 
-    void setOrigin(double lat, double lon, float accuracyM) {
+    void setOrigin(double lat, double lon) {
         myLat = lat;
         myLon = lon;
         haveFix = true;
-        fixLabel = accuracyM > 0
-                ? String.format(java.util.Locale.US, fixFmt, (int) accuracyM)
-                : sFixOk;
-        footerRight = (source.isEmpty() ? sScanning : shortSource(source)) + "  " + fixLabel;
         relocateAll();
         postInvalidateOnAnimation();
     }
 
-    void setPlaces(List<Poi> found, String src) {
+    void setPlaces(List<Poi> found) {
         places.clear();
         if (found != null) places.addAll(found);
-        source = src == null ? "" : src;
-        footerRight = (source.isEmpty() ? sScanning : shortSource(source)) + "  " + fixLabel;
         listScroll = 0f;
         relocateAll();
         postInvalidateOnAnimation();
@@ -446,18 +423,21 @@ final class WorldView extends View {
     }
 
     /**
-     * The slider owns the strip down the right-hand edge; everything else is
-     * left to the gesture detector, which at the moment only watches for the
-     * long press. A plain tap is deliberately unclaimed.
+     * The buttons, the slider down the right-hand edge and the list each own
+     * their patch; a tap anywhere else is deliberately unclaimed.
      */
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         int action = event.getActionMasked();
-        // The magnifier sits above the slider and inside its column, so it has
-        // to be asked first, and the slider only answers for its own height.
-        if (action == MotionEvent.ACTION_DOWN && inSearchIcon(event.getX(), event.getY())) {
-            tapIcon = true;
-            return true;
+        // The buttons sit above the slider and inside its column, so they are
+        // asked first, and the slider only answers for its own height.
+        if (action == MotionEvent.ACTION_DOWN) {
+            int hit = buttonAt(event.getX(), event.getY());
+            if (hit != BTN_NONE) {
+                pressed = hit;
+                postInvalidateOnAnimation();
+                return true;
+            }
         }
         if (action == MotionEvent.ACTION_DOWN && event.getX() >= sliderHit
                 && event.getY() >= sliderTop - 24 * dp
@@ -468,15 +448,21 @@ final class WorldView extends View {
             setRangeIndex(indexAt(event.getY()), false);
             return true;
         }
-        if (tapIcon) {
+        if (pressed != BTN_NONE) {
             if (action == MotionEvent.ACTION_UP) {
-                tapIcon = false;
+                int was = pressed;
+                pressed = BTN_NONE;
+                postInvalidateOnAnimation();
                 performClick();
-                if (inSearchIcon(event.getX(), event.getY()) && listener != null) {
-                    listener.onSearchTapped();
+                // Only if the finger lifts where it went down: sliding off a
+                // button is how you change your mind about pressing it.
+                if (buttonAt(event.getX(), event.getY()) == was && listener != null) {
+                    if (was == BTN_SEARCH) listener.onSearchTapped();
+                    else listener.onSettingsTapped();
                 }
             } else if (action == MotionEvent.ACTION_CANCEL) {
-                tapIcon = false;
+                pressed = BTN_NONE;
+                postInvalidateOnAnimation();
             }
             return true;
         }
@@ -513,11 +499,14 @@ final class WorldView extends View {
             }
             return true;
         }
-        return gestures.onTouchEvent(event) || super.onTouchEvent(event);
+        return super.onTouchEvent(event);
     }
 
-    private boolean inSearchIcon(float x, float y) {
-        return Math.abs(x - iconCx) <= iconR * 2.4f && Math.abs(y - iconCy) <= iconR * 2.4f;
+    /** Which button is under a finger. The gap between them belongs to neither. */
+    private int buttonAt(float x, float y) {
+        if (searchBtn.contains(x, y)) return BTN_SEARCH;
+        if (settingsBtn.contains(x, y)) return BTN_SETTINGS;
+        return BTN_NONE;
     }
 
     private float clampScroll(float v) {
@@ -572,12 +561,17 @@ final class WorldView extends View {
         sliderX = w - pad - 7 * dp;
         sliderHit = w - sliderStrip - 26 * dp;
 
-        statusY = insetTop + 26 * dp;
+        // Buttons at the size a thumb can hit without looking: 48dp square,
+        // 8dp apart, off the edge by the same margin as everything else.
+        float btn = 48 * dp, gap = 8 * dp, btnTop = insetTop + 8 * dp;
+        settingsBtn.set(w - pad - btn, btnTop, w - pad, btnTop + btn);
+        searchBtn.set(settingsBtn.left - gap - btn, btnTop, settingsBtn.left - gap, btnTop + btn);
+        // The heading and the range read on the buttons' centre line.
+        statusY = btnTop + btn / 2f + 6 * dp;
 
         rowH = 30 * dp;
         listViewH = LIST_ROWS * rowH;
-        hintY = h - insetBottom - 12 * dp;
-        listTop = hintY - 28 * dp - listViewH;
+        listTop = h - insetBottom - 8 * dp - listViewH;
 
         // Small. The compass is where you are, not what you came to look at;
         // every dp it gives back is a dp of the thing being searched for.
@@ -588,13 +582,9 @@ final class WorldView extends View {
         // still clears the list below.
         compassCy = listTop - 16 * dp - compassRx - compassThick;
 
-        fieldTop = insetTop + 34 * dp;
+        fieldTop = btnTop + btn + 10 * dp;
         fieldBottom = compassCy;
         horizonBase = fieldTop + (fieldBottom - fieldTop) * 0.19f;
-
-        iconR = 9 * dp;
-        iconCx = w - pad - iconR - 3 * dp;
-        iconCy = insetTop + 20 * dp;
 
         sliderTop = fieldTop + 26 * dp;
         sliderBottom = fieldBottom - 10 * dp;
@@ -644,18 +634,36 @@ final class WorldView extends View {
         drawCompass(canvas);
         drawList(canvas, w, h);
         drawSlider(canvas);
-        drawCorners(canvas, w, h);
+        drawNotice(canvas);
     }
 
-    /** Corner brackets: the edge of the virtual space, drawn as frame only. */
-    private void drawCorners(Canvas canvas, int w, int h) {
-        float m = 6 * dp, len = 20 * dp;
-        path.rewind();
-        path.moveTo(m, m + len); path.lineTo(m, m); path.lineTo(m + len, m);
-        path.moveTo(w - m - len, m); path.lineTo(w - m, m); path.lineTo(w - m, m + len);
-        path.moveTo(w - m, h - m - len); path.lineTo(w - m, h - m); path.lineTo(w - m - len, h - m);
-        path.moveTo(m + len, h - m); path.lineTo(m, h - m); path.lineTo(m, h - m - len);
-        canvas.drawPath(path, pRing);
+    /**
+     * Something worth saying — the compass wants calibrating, a search went
+     * wrong — as a pill at the top of the field, drawn over everything. Only
+     * while there is something to say: there is no footer holding a line open.
+     * With nothing found the same words are already in the middle of the
+     * field, so they are not said twice.
+     */
+    private void drawNotice(Canvas canvas) {
+        String note;
+        if (compassAccuracy == SensorManager.SENSOR_STATUS_ACCURACY_LOW
+                || compassAccuracy == SensorManager.SENSOR_STATUS_UNRELIABLE) {
+            note = sCalibrate;
+        } else if (!status.isEmpty() && !places.isEmpty()) {
+            note = status;
+        } else {
+            return;
+        }
+        pTiny.setColor(COL_TEXT);
+        pTiny.setTextAlign(Paint.Align.CENTER);
+        float half = pTiny.measureText(note) / 2f + 12 * dp;
+        float top = fieldTop + 2 * dp, bottom = top + 28 * dp;
+        oval.set(cx - half, top, cx + half, bottom);
+        canvas.drawRoundRect(oval, 14 * dp, 14 * dp, pNotice);
+        canvas.drawRoundRect(oval, 14 * dp, 14 * dp, pBubble);
+        canvas.drawText(note, cx, top + 19 * dp, pTiny);
+        pTiny.setTextAlign(Paint.Align.LEFT);
+        pTiny.setColor(COL_DIM);
     }
 
     /** The range control: a detent per step, far at the top to match the view. */
@@ -695,16 +703,34 @@ final class WorldView extends View {
         pSmall.setColor(COL_DIM);
         pSmall.setTextAlign(Paint.Align.LEFT);
 
-        drawSearchIcon(canvas);
+        // The search button is lit while it is holding a word.
+        Paint search = query.isEmpty() ? pRing : pTarget;
+        drawButton(canvas, searchBtn, pressed == BTN_SEARCH, search);
+        float r = 8 * dp, mx = searchBtn.centerX(), my = searchBtn.centerY();
+        canvas.drawCircle(mx - 2 * dp, my - 2 * dp, r * 0.8f, search);
+        canvas.drawLine(mx + 2.6f * dp, my + 2.6f * dp, mx + 8 * dp, my + 8 * dp, search);
+
+        drawButton(canvas, settingsBtn, pressed == BTN_SETTINGS, pRing);
+        drawGear(canvas, settingsBtn.centerX(), settingsBtn.centerY());
     }
 
-    /** A magnifier, lit when it is holding a word. */
-    private void drawSearchIcon(Canvas canvas) {
-        Paint paint = query.isEmpty() ? pRing : pTarget;
-        canvas.drawCircle(iconCx - iconR * 0.25f, iconCy - iconR * 0.25f, iconR * 0.8f, paint);
-        float k = iconR * 0.62f;
-        canvas.drawLine(iconCx + k * 0.45f, iconCy + k * 0.45f,
-                iconCx + iconR * 1.15f, iconCy + iconR * 1.15f, paint);
+    /** A button's face: a rounded square, lit up while a finger is on it. */
+    private void drawButton(Canvas canvas, RectF r, boolean down, Paint edge) {
+        pButton.setColor(down ? COL_BUTTON_DOWN : COL_BUTTON);
+        canvas.drawRoundRect(r, 12 * dp, 12 * dp, pButton);
+        canvas.drawRoundRect(r, 12 * dp, 12 * dp, edge == pTarget ? pTarget : pBubble);
+    }
+
+    /** A gear: a ring with eight teeth and a hole, the sign for settings everywhere. */
+    private void drawGear(Canvas canvas, float x, float y) {
+        float outer = 9.5f * dp, inner = 6.5f * dp;
+        for (int i = 0; i < 8; i++) {
+            double a = Math.PI / 4 * i;
+            float c = (float) Math.cos(a), sn = (float) Math.sin(a);
+            canvas.drawLine(x + c * inner, y + sn * inner, x + c * outer, y + sn * outer, pRing);
+        }
+        canvas.drawCircle(x, y, inner, pRing);
+        canvas.drawCircle(x, y, 2.6f * dp, pRing);
     }
 
     /** The ground plane: the horizon, the bearing marks on it, the distance bands. */
@@ -1170,28 +1196,6 @@ final class WorldView extends View {
                 pTarget.setStrokeWidth(2.4f * dp);
             }
         }
-
-        String note;
-        if (compassAccuracy == SensorManager.SENSOR_STATUS_ACCURACY_LOW
-                || compassAccuracy == SensorManager.SENSOR_STATUS_UNRELIABLE) {
-            note = sCalibrate;
-        } else if (!status.isEmpty() && !places.isEmpty()) {
-            note = status;
-        } else {
-            note = sHint;
-        }
-        pTiny.setColor(COL_DIM);
-        canvas.drawText(note, pad, hintY, pTiny);
-        pTiny.setTextAlign(Paint.Align.RIGHT);
-        canvas.drawText(footerRight, w - pad, hintY, pTiny);
-        pTiny.setTextAlign(Paint.Align.LEFT);
-    }
-
-    /** The footer is narrow, so the source gets its short spelling there. */
-    private String shortSource(String src) {
-        if (src.equals(sSourceOsm)) return sOsmShort;
-        if (src.equals(sSourceGoogle)) return sGoogleShort;
-        return src;
     }
 
     /** Trims a label to fit, in whole characters. Called when data changes, not per frame. */
