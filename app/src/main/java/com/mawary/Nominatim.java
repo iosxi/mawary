@@ -30,8 +30,9 @@ import java.util.Locale;
  * sits in the middle: tried for a word before Overpass, never for the sweep.
  *
  * <p>Their usage policy asks for no more than one request a second and for the
- * caller to identify itself. One request per search the user actually submits
- * is well inside that, and the pacing below keeps it so.
+ * caller to identify itself. A search the user submits costs one request, or a
+ * few when a wide range has to be narrowed (see search), always paced at more
+ * than a second apart.
  */
 final class Nominatim {
 
@@ -41,6 +42,12 @@ final class Nominatim {
     private static final int CONNECT_MS = 6_000;
     private static final int READ_MS = 10_000;
     private static final int LIMIT = 40;
+    /**
+     * How many times a full answer may send us back with a smaller box. From
+     * 10 km that reaches 625 m; each round costs a paced request, about 1.3 s.
+     */
+    private static final int MAX_ROUNDS = 5;
+    private static final int MIN_BOX_M = 500;
     /** Their policy is one a second; leave a margin. */
     private static final long MIN_GAP_MS = 1_200L;
 
@@ -49,12 +56,52 @@ final class Nominatim {
     private Nominatim() {}
 
     /**
-     * Places within a box around us whose name carries the word. The box is the
-     * search range, not a circle; anything outside the range is dropped later
-     * by the distance sort, and a box is what the service takes.
+     * Places within the range whose name carries the word, nearest ones
+     * guaranteed.
+     *
+     * <p>Nominatim ranks by its own idea of importance, not by distance, and
+     * stops at the limit. So a wide box that holds more matches than the limit
+     * comes back full of far ones and none of the near: measured for 窓, the
+     * 5 km box gave 8 hits, all within 5 km, the nearest at 772 m; the 10 km
+     * box gave 40, the limit, and not one of them within 5 km — the nearest was
+     * 5.9 km out. Asking for 50, their ceiling, changed nothing.
+     *
+     * <p>A full answer is therefore a cut one, and whenever one comes back full
+     * the box is halved and asked again, until an answer comes back with room
+     * to spare: that one holds everything in its box, so the near end is
+     * complete. The answers are merged, and the distance sort downstream takes
+     * it from there.
      */
-    static synchronized List<Poi> search(String word, double lat, double lon, int radiusM)
-            throws Exception {
+    static List<Poi> search(String word, double lat, double lon, int radiusM) throws Exception {
+        List<Poi> out = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        int[] raw = new int[1];
+        int r = radiusM;
+        for (int round = 0; round < MAX_ROUNDS; round++) {
+            List<Poi> got = searchBox(word, lat, lon, r, raw);
+            // Full is judged on what the service sent, not on what survived the
+            // nameless being dropped: 40 sent with one unnamed is still cut.
+            boolean full = raw[0] >= LIMIT;
+            android.util.Log.i("mawary", "nominatim: box " + r + "m gave " + raw[0]
+                    + (full ? " (full, halving)" : ""));
+            for (Poi p : got) {
+                // The same place turns up in every box that holds it.
+                if (seen.add(p.name + "|" + Math.round(p.lat * 1e5) + "|" + Math.round(p.lon * 1e5))) {
+                    out.add(p);
+                }
+            }
+            if (!full || r <= MIN_BOX_M) break;
+            r /= 2;
+        }
+        return out;
+    }
+
+    /**
+     * One box, the size of the range; a box is what the service takes. How many
+     * results the service sent, named or not, goes in raw[0].
+     */
+    private static synchronized List<Poi> searchBox(String word, double lat, double lon,
+                                                    int radiusM, int[] raw) throws Exception {
         long since = System.currentTimeMillis() - lastCallMs;
         if (lastCallMs != 0L && since < MIN_GAP_MS) {
             Thread.sleep(MIN_GAP_MS - since);
@@ -95,6 +142,7 @@ final class Nominatim {
         }
 
         JSONArray arr = new JSONArray(text);
+        raw[0] = arr.length();
         List<Poi> out = new ArrayList<>();
         for (int i = 0; i < arr.length(); i++) {
             JSONObject o = arr.optJSONObject(i);
