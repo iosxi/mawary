@@ -13,12 +13,16 @@ import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
+import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.SeekBar;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.List;
@@ -42,6 +46,9 @@ public final class MainActivity extends Activity
 
     private static final String PREFS = "mawary";
     private static final String KEY_API = "places_api_key";
+    private static final String KEY_LABEL_TRANSPARENCY = "label_transparency";
+    /** The transparency slider moves in steps of this many percent. */
+    private static final int TRANSPARENCY_STEP = 5;
 
     private WorldView view;
     private Heading heading;
@@ -68,6 +75,7 @@ public final class MainActivity extends Activity
 
         view = new WorldView(this);
         view.setListener(this);
+        view.setLabelTransparency(labelTransparency());
         setContentView(view);
 
         // After setContentView: the insets controller hangs off the decor view,
@@ -87,6 +95,11 @@ public final class MainActivity extends Activity
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         String stored = prefs.getString(KEY_API, "");
         return stored.isEmpty() ? BuildConfig.PLACES_API_KEY : stored;
+    }
+
+    private int labelTransparency() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getInt(KEY_LABEL_TRANSPARENCY, WorldView.DEFAULT_LABEL_TRANSPARENCY);
     }
 
     @Override
@@ -298,8 +311,84 @@ public final class MainActivity extends Activity
                 Toast.LENGTH_SHORT).show();
     }
 
+    /** Long press: a short menu of the few things there are to set. */
     @Override
     public void onConfigureRequested() {
+        String[] items = {
+                getString(R.string.settings_transparency_item, labelTransparency()),
+                getString(R.string.api_key_title),
+        };
+        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog)
+                .setTitle(R.string.settings_title)
+                .setItems(items, (d, which) -> {
+                    if (which == 0) openTransparency();
+                    else openApiKey();
+                })
+                .show();
+    }
+
+    /**
+     * How see-through the label backgrounds are. The labels change as the
+     * slider moves, and the dialog sits at the bottom without dimming the
+     * screen, so what it does is visible while choosing.
+     */
+    private void openTransparency() {
+        final SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        final int before = labelTransparency();
+        float dp = getResources().getDisplayMetrics().density;
+
+        final TextView value = new TextView(this);
+        value.setTextColor(Color.WHITE);
+        value.setTextSize(18f);
+        value.setGravity(Gravity.CENTER);
+        value.setText(getString(R.string.percent_fmt, before));
+
+        final SeekBar bar = new SeekBar(this);
+        bar.setMax(100 / TRANSPARENCY_STEP);
+        bar.setProgress(before / TRANSPARENCY_STEP);
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
+                int pct = progress * TRANSPARENCY_STEP;
+                value.setText(getString(R.string.percent_fmt, pct));
+                view.setLabelTransparency(pct);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar s) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {
+            }
+        });
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int side = (int) (20 * dp);
+        box.setPadding(side, (int) (8 * dp), side, 0);
+        box.addView(value);
+        box.addView(bar);
+
+        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog)
+                .setTitle(R.string.transparency_title)
+                .setMessage(R.string.transparency_message)
+                .setView(box)
+                .setPositiveButton(android.R.string.ok, (d, which) ->
+                        prefs.edit().putInt(KEY_LABEL_TRANSPARENCY,
+                                bar.getProgress() * TRANSPARENCY_STEP).apply())
+                .setNegativeButton(android.R.string.cancel, (d, which) ->
+                        view.setLabelTransparency(before))
+                .setOnCancelListener(d -> view.setLabelTransparency(before))
+                .create();
+        dialog.show();
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            dialog.getWindow().setGravity(Gravity.BOTTOM);
+        }
+    }
+
+    private void openApiKey() {
         final SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         final EditText input = new EditText(this);
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);

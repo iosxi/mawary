@@ -43,7 +43,7 @@ final class WorldView extends View {
     interface Listener {
         /** The user cycled the range; time to widen or narrow the search. */
         void onRangeChanged(int radiusM);
-        /** Long press: the user is asking for the API key prompt. */
+        /** Long press: the user is asking for the settings. */
         void onConfigureRequested();
         /** The magnifier: the user wants to say what they are looking for. */
         void onSearchTapped();
@@ -83,11 +83,23 @@ final class WorldView extends View {
     private static final float[] SPOT_DY = {-1, -D, -D, 0, 0, D, D, 1};
     private static final float[] SPOT_AX = {0.5f, 0, 1, 0, 1, 0, 1, 0.5f};
     private static final float[] SPOT_AY = {1, 1, 1, 0.5f, 0.5f, 0, 0, 0};
-    /** How far out along each direction a label may sit, in dp: near first. */
-    private static final float[] LEADS = {16, 38, 66, 104, 150};
+    /**
+     * How far out along each direction a label may sit, in dp. Finely stepped
+     * at the near end, where the shortest leader that clears a neighbour is
+     * usually found.
+     */
+    private static final float[] LEADS = {8, 20, 34, 52, 76, 108, 150};
+    private static final int SPOTS = SPOT_DX.length * LEADS.length;
+    /**
+     * What a pixel of leader costs, against a pixel of overlap. Taking a
+     * leader a label-height further out has to save more than a label-height
+     * square of overlap: short leaders win unless the overlap is real.
+     */
+    private static final float LEAD_WEIGHT = 2.5f;
 
-    /** Label backgrounds are the night sky, dimmed: what is behind still shows. */
-    private static final int COL_LABEL_BG = 0xB805080A;
+    /** Label backgrounds are the night sky; how much of what is behind shows is a setting. */
+    private static final int COL_LABEL_BG = 0x0005080A;
+    static final int DEFAULT_LABEL_TRANSPARENCY = 66;
     /** Deliberately not a whole number: a half row showing is what says "scroll me". */
     private static final float LIST_ROWS = 3.5f;
 
@@ -135,6 +147,12 @@ final class WorldView extends View {
     private final float[] labelEnd = new float[MAX_FIELD_LABELS * 2];
     private final Poi[] labelPoi = new Poi[MAX_FIELD_LABELS];
     private int labelCount;
+    private final float[] labelW = new float[MAX_FIELD_LABELS];
+    private final int[] labelSpot = new int[MAX_FIELD_LABELS];
+    /** What each spot of each label costs against the fixed scenery, this frame. */
+    private final float[] spotCost = new float[MAX_FIELD_LABELS * SPOTS];
+    /** The box spotBox() last worked out, and where its leader meets it. */
+    private float cL, cT, cR, cB, cEx, cEy;
     /** Font metrics for the two lines of a label, read once. */
     private float nameAsc, nameDesc, distAsc, distDesc;
     private final RectF oval = new RectF();
@@ -227,6 +245,7 @@ final class WorldView extends View {
 
         pLabelBg.setStyle(Paint.Style.FILL);
         pLabelBg.setColor(COL_LABEL_BG);
+        setLabelTransparency(DEFAULT_LABEL_TRANSPARENCY);
         stroke(pLeader, COL_TARGET, 1.2f);
 
         sScanning = ctx.getString(R.string.source_scanning);
@@ -333,6 +352,13 @@ final class WorldView extends View {
         if (next.equals(query)) return;
         query = next;
         listScroll = 0f;
+        postInvalidateOnAnimation();
+    }
+
+    /** How see-through the label backgrounds are, in percent: 0 solid, 100 not there. */
+    void setLabelTransparency(int percent) {
+        int pct = Math.max(0, Math.min(100, percent));
+        pLabelBg.setAlpha(Math.round(255 * (100 - pct) / 100f));
         postInvalidateOnAnimation();
     }
 
@@ -758,94 +784,177 @@ final class WorldView extends View {
             diamond(canvas, x, y - stem - 5 * dp, 7f * dp, pTarget);
         }
 
-        // Places nearest first, so the nearest get the clear spots; draws
-        // furthest first, so where it cannot be helped the nearest end up on top.
-        labelCount = 0;
-        for (int i = 0; i < ahead.size() && labelCount < MAX_FIELD_LABELS; i++) {
-            placeLabel(ahead.get(i), stem);
-        }
+        layoutLabels(stem);
+        // Draws furthest first, so where it cannot be helped the nearest end up on top.
         for (int i = labelCount - 1; i >= 0; i--) {
             drawLabel(canvas, i, stem);
         }
     }
 
     /**
-     * Finds the least crowded of the spots around a stake and takes it.
+     * Places every label at once, keeping leaders short above all.
      *
-     * <p>Every spot is scored rather than the first clear one taken, because
-     * when the field is full there is no clear one, and the least bad is still
-     * worth having. The score is the area the label would hide — of labels
-     * already placed, of stakes, of the compass, of the edge of the screen —
-     * plus a little for a long leader and a little for moving off last frame's
-     * spot, so a label does not flicker between two equally good places.
+     * <p>A long leader is worse than an overlap: a label sitting beside one
+     * stake while its line runs off to another reads as belonging to the wrong
+     * one. So a leader's length is the main cost, and a leader that crosses
+     * another leader, or runs through another label, is charged on top.
+     *
+     * <p>This is point-feature label placement, the problem Christensen, Marks
+     * and Shieber solved by simulated annealing. Annealing is random, and a
+     * frame that lays out a little differently each time makes labels shimmer,
+     * so this takes the deterministic cousin: a greedy start, nearest first so
+     * the nearest get first pick, then a few passes that move each label to its
+     * best spot given where all the others now sit. Every pass can only lower
+     * the total, and three settle it in practice.
+     *
+     * <p>What a spot costs against the fixed scenery — stakes, compass, range
+     * readout, its own leader — does not depend on the other labels, so it is
+     * worked out once per frame and only the label-against-label part is redone.
      */
-    private void placeLabel(Poi p, float stem) {
+    private void layoutLabels(float stem) {
+        int n = Math.min(ahead.size(), MAX_FIELD_LABELS);
+        labelCount = n;
         final float padX = 6 * dp, padY = 3 * dp;
-        float w = Math.max(p.nameW, p.distW) + 2 * padX;
         float h = padY + nameAsc + nameDesc + distAsc + distDesc + padY;
-        float px = p.sx, py = p.sy - stem - 5 * dp;
-
-        float minX = pad * 0.5f, maxX = cx + halfSpanPx + 8 * dp;
         float rangeY = sliderY(rangeIndex);
         float rangeLeft = sliderX - 15 * dp - pSmall.measureText(rangeShort);
-        float minY = fieldTop, maxY = listTop - 12 * dp;
-        float area = w * h;
 
-        int best = 0;
-        float bestCost = Float.MAX_VALUE;
-        int spots = SPOT_DX.length * LEADS.length;
-        for (int s = 0; s < spots; s++) {
-            int dir = s % SPOT_DX.length, lead = s / SPOT_DX.length;
-            float l = LEADS[lead] * dp;
-            float left = px + SPOT_DX[dir] * l - SPOT_AX[dir] * w;
-            float top = py + SPOT_DY[dir] * l - SPOT_AY[dir] * h;
-            float right = left + w, bottom = top + h;
-
-            float cost = 8f * (area - overlap(left, top, right, bottom, minX, minY, maxX, maxY));
-            for (int k = 0; k < labelCount; k++) {
-                cost += 6f * overlap(left, top, right, bottom,
-                        labelBox[k * 4], labelBox[k * 4 + 1],
-                        labelBox[k * 4 + 2], labelBox[k * 4 + 3]);
-            }
-            if (cost >= bestCost) continue;
-            for (int k = 0; k < ahead.size(); k++) {
-                Poi q = ahead.get(k);
-                cost += 2f * overlap(left, top, right, bottom,
-                        q.sx - 8 * dp, q.sy - stem - 13 * dp, q.sx + 8 * dp, q.sy);
-            }
-            cost += 2f * overlap(left, top, right, bottom, cx - compassRx, compassCy - compassRx,
-                    cx + compassRx, compassCy + compassRx + compassThick);
-            // The range readout on the slider is the one number you set by
-            // hand, so it is kept as clear as a placed label.
-            cost += 4f * overlap(left, top, right, bottom, rangeLeft, rangeY - 14 * dp,
-                    sliderX + 11 * dp, rangeY + 12 * dp);
-            cost += l * h * 0.25f + dir * 12 * dp * dp;
-            if (s != p.labelSpot) cost += area * 0.15f;
-            if (cost < bestCost) {
-                bestCost = cost;
-                best = s;
+        for (int i = 0; i < n; i++) {
+            Poi p = ahead.get(i);
+            labelPoi[i] = p;
+            float w = Math.max(p.nameW, p.distW) + 2 * padX;
+            labelW[i] = w;
+            float px = p.sx, py = p.sy - stem - 5 * dp;
+            for (int s = 0; s < SPOTS; s++) {
+                spotBox(px, py, w, h, s);
+                float cost = 0f;
+                for (int k = 0; k < ahead.size(); k++) {
+                    Poi q = ahead.get(k);
+                    cost += overlap(cL, cT, cR, cB,
+                            q.sx - 8 * dp, q.sy - stem - 13 * dp, q.sx + 8 * dp, q.sy);
+                }
+                cost += overlap(cL, cT, cR, cB, cx - compassRx, compassCy - compassRx,
+                        cx + compassRx, compassCy + compassRx + compassThick);
+                // The range readout on the slider is the one number you set
+                // by hand, so a label all but never sits on it.
+                cost += 30f * overlap(cL, cT, cR, cB, rangeLeft, rangeY - 14 * dp,
+                        sliderX + 11 * dp, rangeY + 12 * dp);
+                // Measured after the label is pulled onto the screen, so a
+                // spot off the edge is charged for the leader it really gets.
+                cost += (float) Math.hypot(cEx - px, cEy - py) * h * LEAD_WEIGHT;
+                cost += (s % SPOT_DX.length) * 4 * dp * dp;
+                if (s != p.labelSpot) cost += w * h * 0.1f;
+                spotCost[i * SPOTS + s] = cost;
             }
         }
-        p.labelSpot = best;
 
-        int dir = best % SPOT_DX.length;
-        float l = LEADS[best / SPOT_DX.length] * dp;
+        for (int pass = 0; pass < 3; pass++) {
+            for (int i = 0; i < n; i++) {
+                // The first pass sees only the labels already placed; later
+                // passes see all of them where they now are.
+                int others = pass == 0 ? i : n;
+                Poi p = labelPoi[i];
+                float w = labelW[i];
+                float px = p.sx, py = p.sy - stem - 5 * dp;
+                int best = 0;
+                float bestCost = Float.MAX_VALUE;
+                for (int s = 0; s < SPOTS; s++) {
+                    float cost = spotCost[i * SPOTS + s];
+                    if (cost >= bestCost) continue;
+                    spotBox(px, py, w, h, s);
+                    for (int k = 0; k < others && cost < bestCost; k++) {
+                        if (k == i) continue;
+                        float kl = labelBox[k * 4], kt = labelBox[k * 4 + 1];
+                        float kr = labelBox[k * 4 + 2], kb = labelBox[k * 4 + 3];
+                        Poi q = labelPoi[k];
+                        float qx = q.sx, qy = q.sy - stem - 5 * dp;
+                        float kex = labelEnd[k * 2], key = labelEnd[k * 2 + 1];
+                        cost += 2f * overlap(cL, cT, cR, cB, kl, kt, kr, kb);
+                        if (segmentsCross(px, py, cEx, cEy, qx, qy, kex, key)) {
+                            cost += 2f * h * h;
+                        }
+                        if (segmentHitsBox(px, py, cEx, cEy, kl, kt, kr, kb)) cost += h * h;
+                        if (segmentHitsBox(qx, qy, kex, key, cL, cT, cR, cB)) cost += h * h;
+                    }
+                    if (cost < bestCost) {
+                        bestCost = cost;
+                        best = s;
+                    }
+                }
+                spotBox(px, py, w, h, best);
+                labelSpot[i] = best;
+                labelBox[i * 4] = cL;
+                labelBox[i * 4 + 1] = cT;
+                labelBox[i * 4 + 2] = cR;
+                labelBox[i * 4 + 3] = cB;
+                labelEnd[i * 2] = cEx;
+                labelEnd[i * 2 + 1] = cEy;
+            }
+        }
+        for (int i = 0; i < n; i++) labelPoi[i].labelSpot = labelSpot[i];
+    }
+
+    /**
+     * The box a label would take at a spot, and where its leader would meet
+     * it, into cL..cEy. A box that would leave the field is pulled back in and
+     * the leader follows it.
+     */
+    private void spotBox(float px, float py, float w, float h, int s) {
+        int dir = s % SPOT_DX.length;
+        float l = LEADS[s / SPOT_DX.length] * dp;
         float left = px + SPOT_DX[dir] * l - SPOT_AX[dir] * w;
         float top = py + SPOT_DY[dir] * l - SPOT_AY[dir] * h;
-        // Nowhere was wholly on screen: pull it in, and the leader follows.
+        float minX = pad * 0.5f, maxX = cx + halfSpanPx + 8 * dp;
+        float minY = fieldTop, maxY = listTop - 12 * dp;
         if (left + w > maxX) left = maxX - w;
         if (left < minX) left = minX;
         if (top + h > maxY) top = maxY - h;
         if (top < minY) top = minY;
+        cL = left;
+        cT = top;
+        cR = left + w;
+        cB = top + h;
+        cEx = left + SPOT_AX[dir] * w;
+        cEy = top + SPOT_AY[dir] * h;
+    }
 
-        int n = labelCount++;
-        labelPoi[n] = p;
-        labelBox[n * 4] = left;
-        labelBox[n * 4 + 1] = top;
-        labelBox[n * 4 + 2] = left + w;
-        labelBox[n * 4 + 3] = top + h;
-        labelEnd[n * 2] = left + SPOT_AX[dir] * w;
-        labelEnd[n * 2 + 1] = top + SPOT_AY[dir] * h;
+    /** Whether two segments properly cross; touching at an end does not count. */
+    private static boolean segmentsCross(float ax, float ay, float bx, float by,
+                                         float ex, float ey, float fx, float fy) {
+        float d1 = cross(ex, ey, fx, fy, ax, ay), d2 = cross(ex, ey, fx, fy, bx, by);
+        float d3 = cross(ax, ay, bx, by, ex, ey), d4 = cross(ax, ay, bx, by, fx, fy);
+        return d1 * d2 < 0 && d3 * d4 < 0;
+    }
+
+    private static float cross(float ox, float oy, float ax, float ay, float bx, float by) {
+        return (ax - ox) * (by - oy) - (ay - oy) * (bx - ox);
+    }
+
+    /** Whether a segment passes through the inside of a box (Liang–Barsky). */
+    private static boolean segmentHitsBox(float x0, float y0, float x1, float y1,
+                                          float l, float t, float r, float b) {
+        float dx = x1 - x0, dy = y1 - y0;
+        float t0 = 0f, t1 = 1f;
+        float pp, qq;
+        for (int e = 0; e < 4; e++) {
+            if (e == 0) { pp = -dx; qq = x0 - l; }
+            else if (e == 1) { pp = dx; qq = r - x0; }
+            else if (e == 2) { pp = -dy; qq = y0 - t; }
+            else { pp = dy; qq = b - y0; }
+            if (pp == 0f) {
+                if (qq <= 0f) return false;
+            } else {
+                float u = qq / pp;
+                if (pp < 0f) {
+                    if (u > t1) return false;
+                    if (u > t0) t0 = u;
+                } else {
+                    if (u < t0) return false;
+                    if (u < t1) t1 = u;
+                }
+            }
+        }
+        return t1 - t0 > 1e-3f;
     }
 
     /** Area two rectangles share. */

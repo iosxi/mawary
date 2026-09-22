@@ -24,7 +24,7 @@
     <string name="nothing_ahead">正面には何もありません。体を回してください</string>
     <string name="stand_by">準備中</string>
     <string name="calibrate">方位が未校正です。8 の字に振ってください</string>
-    <string name="hint">虫眼鏡: 検索　長押し: API キー</string>
+    <string name="hint">虫眼鏡: 検索　長押し: 設定</string>
 
     <!-- 取得結果 -->
     <string name="source_google">Google マップ</string>
@@ -46,6 +46,13 @@
     <string name="search_clear">空にする</string>
     <string name="searching_for">「%1$s」を探します</string>
     <string name="search_cleared">周りのものを一通り出します</string>
+
+    <!-- 設定（長押し） -->
+    <string name="settings_title">設定</string>
+    <string name="settings_transparency_item">ラベルの透過度（%1$d%%）</string>
+    <string name="transparency_title">ラベルの透過度</string>
+    <string name="transparency_message">名前の札の地をどれだけ透かすか。0% で不透明、100% で地なし。動かすとその場で変わります。</string>
+    <string name="percent_fmt">%1$d%%</string>
 
     <!-- API キーの入力 -->
     <string name="api_key_title">Google Places API キー</string>
