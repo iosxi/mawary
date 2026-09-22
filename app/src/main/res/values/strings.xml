@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">mawary</string>
+
+    <string name="api_key_title">Google Places API キー</string>
+    <string name="api_key_message">キーを入れると Google マップの検索結果を表示します。空のままなら OpenStreetMap を使います。</string>
+    <string name="source_google">Google Places を使います</string>
+    <string name="source_osm">OpenStreetMap を使います</string>
+</resources>

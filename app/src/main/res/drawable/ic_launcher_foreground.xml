@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- outer wireframe ring -->
+    <path android:strokeColor="#3FE0C8" android:strokeWidth="2.4" android:fillColor="#00000000"
+        android:pathData="M54,24a30,30 0 1,0 0.1,0z" />
+    <!-- inner ring -->
+    <path android:strokeColor="#1F7A70" android:strokeWidth="1.6" android:fillColor="#00000000"
+        android:pathData="M54,39a15,15 0 1,0 0.1,0z" />
+    <!-- cross hairs -->
+    <path android:strokeColor="#1F7A70" android:strokeWidth="1.4"
+        android:pathData="M54,20V32 M54,76V88 M20,54H32 M76,54H88" />
+    <!-- pointing needle (back-of-phone direction) -->
+    <path android:fillColor="#3FE0C8" android:pathData="M54,26L62,58L54,52L46,58Z" />
+    <!-- target marker -->
+    <path android:strokeColor="#FFB454" android:strokeWidth="2.2" android:fillColor="#00000000"
+        android:pathData="M67,37l5,5l-5,5l-5,-5z" />
+</vector>

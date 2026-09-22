@@ -1,0 +1,74 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Google Places API key: put MAWARY_PLACES_API_KEY=... in local.properties
+// (or leave it empty and enter the key inside the app).
+def placesKey = ""
+def lp = rootProject.file("local.properties")
+if (lp.exists()) {
+    def props = new Properties()
+    lp.withInputStream { props.load(it) }
+    placesKey = props.getProperty("MAWARY_PLACES_API_KEY", "")
+}
+
+// Signing lives outside the repository, as in the sibling projects.
+def ks = new Properties()
+def ksFile = rootProject.file("keystore.properties")
+if (ksFile.exists()) {
+    ksFile.withInputStream { ks.load(it) }
+}
+
+android {
+    namespace 'com.mawary'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.mawary"
+        minSdk 28          // Android 9 (Pie)
+        targetSdk 36       // Android 16
+        versionCode 1
+        versionName "1.0"
+        buildConfigField "String", "PLACES_API_KEY", "\"${placesKey}\""
+        resConfigs "ja", "en"
+    }
+
+    signingConfigs {
+        release {
+            if (ks.containsKey("storeFile")) {
+                storeFile rootProject.file(ks.getProperty("storeFile"))
+                storePassword ks.getProperty("storePassword")
+                keyAlias ks.getProperty("keyAlias")
+                keyPassword ks.getProperty("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig ks.containsKey("storeFile") ? signingConfigs.release : null
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packagingOptions {
+        resources {
+            excludes += ['META-INF/**', 'kotlin/**', '**/*.kotlin_metadata']
+        }
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = "UTF-8"
+}
