@@ -50,6 +50,8 @@ final class PlaceRepository {
     interface Listener {
         void onPlaces(List<Poi> places, String source);
         void onStatus(String message);
+        /** A search is out (or waiting its turn to go out), or no longer is. */
+        void onBusy(boolean busy);
     }
 
     private static final String TAG = "mawary";
@@ -301,19 +303,39 @@ final class PlaceRepository {
                 + Math.round(lat * 1000d) + "," + Math.round(lon * 1000d);
     }
 
+    private boolean busy;
+
+    /** Tells the listener only when it changes, so it can animate for as long as it is true. */
+    private void setBusy(boolean b) {
+        if (b == busy) return;
+        busy = b;
+        listener.onBusy(b);
+    }
+
     /** Forces the next request through, ignoring the coalescing rules. */
     void invalidate() {
         lastLat = Double.NaN;
         lastFetchMs = 0L;
     }
 
-    /** The places already in hand whose name contains the word. */
+    /**
+     * The places whose name contains the word — every part of it, when it was
+     * typed with spaces between.
+     */
     private static List<Poi> matching(List<Poi> all, String word) {
-        String needle = fold(word);
+        String[] needles = fold(word).trim().split("\\s+");
         List<Poi> out = new ArrayList<>();
         for (int i = 0; i < all.size(); i++) {
             Poi p = all.get(i);
-            if (fold(p.name).contains(needle)) out.add(p);
+            String name = fold(p.name);
+            boolean hit = true;
+            for (String n : needles) {
+                if (!name.contains(n)) {
+                    hit = false;
+                    break;
+                }
+            }
+            if (hit) out.add(p);
         }
         return out;
     }
@@ -392,6 +414,7 @@ final class PlaceRepository {
             lastFetchMs = hit.at;
             Log.i(TAG, "requestAround: answered from cache, " + hit.places.size() + " held");
             deliveredKey = key;
+            setBusy(false);
             listener.onStatus("");
             listener.onPlaces(nearest(hit.places, lat, lon), hit.source);
             return;
@@ -448,11 +471,13 @@ final class PlaceRepository {
             pendRadius = radiusM;
             main.removeCallbacks(retry);
             main.postDelayed(retry, MIN_GAP_MS - sinceNetwork);
+            setBusy(true);
             Log.i(TAG, "requestAround: pacing, " + (MIN_GAP_MS - sinceNetwork) + "ms to go");
             return;
         }
 
         inFlight = true;
+        setBusy(true);
         main.removeCallbacks(retry);
         lastLat = lat;
         lastLon = lon;
@@ -481,7 +506,12 @@ final class PlaceRepository {
             if ((result == null || result.isEmpty())
                     && !query.isEmpty() && topicFor(query) == null) {
                 try {
-                    List<Poi> hits = Nominatim.search(query, lat, lon, radiusM);
+                    // Only what really carries the word. Matching by token, it
+                    // answered 木 with three cemeteries, none with 木 in the
+                    // name, and an answer that is not empty stops the search
+                    // from going on to Overpass, which would have found
+                    // 創成材木店. Dropped, the search goes on.
+                    List<Poi> hits = matching(Nominatim.search(query, lat, lon, radiusM), query);
                     if (!hits.isEmpty()) {
                         result = hits;
                         source = sourceOsm;
@@ -546,6 +576,8 @@ final class PlaceRepository {
                     invalidate();
                     requestAround(pendLat, pendLon, pendRadius);
                 }
+                // Asking again above may have started the next one.
+                if (!inFlight && !pending) setBusy(false);
                 if (gen != generation.get()) return;    // superseded by a newer request
                 if (msg != null) listener.onStatus(msg);
                 if (out != null) {
@@ -818,6 +850,12 @@ final class PlaceRepository {
             }
             b.append("nwr(").append(around).append(")[name~\"").append(re)
                     .append("\"][railway];");
+            // A named building is a place too, even with nothing saying what
+            // it is: 創成材木店 is mapped as building=yes and a name, nothing
+            // more, and could not be found by any word at all without this.
+            // Roads and kerbs stay out: they are not buildings.
+            b.append("nwr(").append(around).append(")[building][name~\"").append(re)
+                    .append("\"];");
             return b.toString();
         }
 

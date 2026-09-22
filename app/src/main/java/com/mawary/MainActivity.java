@@ -238,6 +238,11 @@ public final class MainActivity extends Activity
         view.setStatus(message);
     }
 
+    @Override
+    public void onBusy(boolean busy) {
+        view.setBusy(busy);
+    }
+
     // ----------------------------------------------------------- view taps
 
     @Override

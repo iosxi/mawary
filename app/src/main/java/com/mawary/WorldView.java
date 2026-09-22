@@ -142,6 +142,8 @@ final class WorldView extends View {
     private final Paint pBubble = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pButton = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pNotice = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pSpinner = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pSpinTrack = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final Path path = new Path();
     /** A label's tail, before it is merged into the bubble. */
@@ -192,6 +194,8 @@ final class WorldView extends View {
     /** How far the list is scrolled, and what it would take to scroll it all. */
     private float listScroll, listContentH, listViewH;
     private String status = "";
+    /** A search is out. The spinner turns for exactly as long as this is set. */
+    private boolean busy;
     private boolean permissionNeeded;
 
     private int rangeIndex = 3;   // 1000 m
@@ -258,6 +262,9 @@ final class WorldView extends View {
         pButton.setStyle(Paint.Style.FILL);
         pNotice.setStyle(Paint.Style.FILL);
         pNotice.setColor(0xE605080A);
+        stroke(pSpinner, COL_TARGET, 4f);
+        pSpinner.setStrokeCap(Paint.Cap.ROUND);
+        stroke(pSpinTrack, COL_GRID, 4f);
 
         sNeedPermission = ctx.getString(R.string.need_permission);
         sAcquiring = ctx.getString(R.string.acquiring);
@@ -353,6 +360,12 @@ final class WorldView extends View {
         String next = s == null ? "" : s;
         if (next.equals(status)) return;
         status = next;
+        postInvalidateOnAnimation();
+    }
+
+    void setBusy(boolean b) {
+        if (b == busy) return;
+        busy = b;
         postInvalidateOnAnimation();
     }
 
@@ -634,7 +647,45 @@ final class WorldView extends View {
         drawCompass(canvas);
         drawList(canvas, w, h);
         drawSlider(canvas);
+        if (busy) {
+            drawSpinner(canvas, horizonY);
+            // The one thing that redraws on a timer, and only while it turns.
+            postInvalidateOnAnimation();
+        }
         drawNotice(canvas);
+    }
+
+    /**
+     * Searching: an arc chasing round a faint ring, in the middle of the field,
+     * on a card of its own so it reads over whatever labels are already up,
+     * with what the search is doing written under it. The arc swings between
+     * short and long as it turns, so it looks alive even when the frame rate
+     * drops and the turn itself stutters.
+     */
+    private void drawSpinner(Canvas canvas, float horizonY) {
+        String words = status.isEmpty() ? sSearching : status;
+        float r = 18 * dp;
+        float textW = pSmall.measureText(words);
+        float halfW = Math.max(r + 24 * dp, textW / 2f + 20 * dp);
+        float midY = (horizonY + fieldBottom) / 2f;
+        float top = midY - 46 * dp, bottom = midY + 46 * dp;
+        oval.set(cx - halfW, top, cx + halfW, bottom);
+        canvas.drawRoundRect(oval, 14 * dp, 14 * dp, pNotice);
+        canvas.drawRoundRect(oval, 14 * dp, 14 * dp, pBubble);
+
+        float sy = top + 16 * dp + r;
+        long t = android.os.SystemClock.uptimeMillis();
+        float spin = (t % 900L) * 360f / 900f;
+        float sweep = 150f + 110f * (float) Math.sin(t % 1800L * (2 * Math.PI / 1800.0));
+        canvas.drawCircle(cx, sy, r, pSpinTrack);
+        oval.set(cx - r, sy - r, cx + r, sy + r);
+        canvas.drawArc(oval, spin, sweep, false, pSpinner);
+
+        pSmall.setTextAlign(Paint.Align.CENTER);
+        pSmall.setColor(COL_TEXT);
+        canvas.drawText(words, cx, bottom - 14 * dp, pSmall);
+        pSmall.setColor(COL_DIM);
+        pSmall.setTextAlign(Paint.Align.LEFT);
     }
 
     /**
@@ -649,7 +700,8 @@ final class WorldView extends View {
         if (compassAccuracy == SensorManager.SENSOR_STATUS_ACCURACY_LOW
                 || compassAccuracy == SensorManager.SENSOR_STATUS_UNRELIABLE) {
             note = sCalibrate;
-        } else if (!status.isEmpty() && !places.isEmpty()) {
+        } else if (!status.isEmpty() && !places.isEmpty() && !busy) {
+            // While searching, the spinner card already carries the status.
             note = status;
         } else {
             return;
@@ -791,7 +843,8 @@ final class WorldView extends View {
             return;
         }
         if (places.isEmpty()) {
-            centreMessage(canvas, status.isEmpty() ? sSearching : status, horizonY);
+            // While a search is out the spinner says so, words and all.
+            if (!busy) centreMessage(canvas, status.isEmpty() ? sSearching : status, horizonY);
             return;
         }
 
