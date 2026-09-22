@@ -335,10 +335,20 @@ public final class MainActivity extends Activity
     /**
      * A place was tapped, in the field or in the list: hand it to Google Maps.
      *
-     * <p>A pin at the coordinates we already hold, labelled with the name, and
-     * not a search for the name: the coordinates are what the place actually
-     * is here, while a search for "セブン-イレブン" from a moving phone can land
-     * on a different branch a street away.
+     * <p>What goes over is the <i>name, searched around</i> the coordinates we
+     * hold, not a pin dropped at them. The two maps do not put a thing in the
+     * same spot — OpenStreetMap's からまつ公園 and Google's are tens of metres
+     * apart — so a pin at our coordinates lands beside Google's own record of
+     * the place and opens nothing but a bare marker: no hours, no rating, no
+     * phone. Measured on the device: the same place with {@code q=lat,lon(name)}
+     * gave a dropped pin with "基本情報 / 距離を測定", while {@code q=name} gave
+     * the clinic's own page with its rating and a call button.
+     *
+     * <p>The coordinates are not wasted, they become the centre of the search:
+     * "セイコーマート" sent with a point in 南郷 lists the 南郷 branches, and the
+     * same word sent with a point by 札幌駅 lists すすきの and 南8条. So a name
+     * shared by several branches still resolves to the nearby ones, which is
+     * what the pin was guarding against.
      *
      * <p>Google Maps is asked for by name, since that is what was asked for,
      * and any other map app takes it if Maps is not installed. Both are tried
@@ -348,9 +358,12 @@ public final class MainActivity extends Activity
     @Override
     public void onPlaceTapped(Poi place) {
         String at = place.lat + "," + place.lon;
-        String pin = place.name == null || place.name.isEmpty() ? at : at + "(" + place.name + ")";
+        // Nameless is only possible in theory — every source drops a place
+        // without a name — but with nothing to search for, the point itself is
+        // the best that can be said.
+        String q = place.name == null || place.name.isEmpty() ? at : place.name;
         Intent i = new Intent(Intent.ACTION_VIEW,
-                Uri.parse("geo:" + at + "?q=" + Uri.encode(pin)));
+                Uri.parse("geo:" + at + "?q=" + Uri.encode(q)));
         i.setPackage("com.google.android.apps.maps");
         try {
             startActivity(i);
