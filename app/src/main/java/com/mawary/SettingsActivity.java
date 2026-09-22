@@ -28,11 +28,11 @@ import android.widget.TextView;
 
 /**
  * The settings, as a screen of their own rather than a dialog you had to know
- * to long-press for. Two things to set, and underneath them what the main
- * screen knows about where its data came from: that used to sit in a footer
- * across the bottom of the main screen, which is space the field can use.
+ * to long-press for. A handful of things to set, and underneath them what the
+ * main screen knows about where its data came from: that used to sit in a
+ * footer across the bottom of the main screen, which is space the field can use.
  *
- * <p>Changes are saved as they are made (the transparency) or on the way out
+ * <p>Changes are saved as they are made (the sliders and switches) or on the way out
  * (the key), and the main screen reads them back when it resumes, so there is
  * no result to pass back.
  */
@@ -48,6 +48,8 @@ public final class SettingsActivity extends Activity {
     private float dp;
     private SharedPreferences prefs;
     private EditText keyInput;
+    /** The sample label, kept so the switches that change its shape can redraw it. */
+    private LabelPreview preview;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -80,10 +82,14 @@ public final class SettingsActivity extends Activity {
         body.setPadding(px(16), px(4), px(16), px(24));
         body.addView(sectionTitle(R.string.section_display));
         body.addView(transparencyCard());
+        body.addView(gap(), new LinearLayout.LayoutParams(1, px(12)));
+        // Below the transparency, because it changes the same sample label.
+        body.addView(switchCard(R.string.pin_distance_title, R.string.pin_distance_message,
+                MainActivity.KEY_HIDE_PIN_DISTANCE, false, on -> preview.setShowDistance(!on)));
         body.addView(sectionTitle(R.string.section_search));
-        body.addView(tiltRangeCard());
-        View gap = new View(this);
-        body.addView(gap, new LinearLayout.LayoutParams(1, px(12)));
+        body.addView(switchCard(R.string.tilt_range_title, R.string.tilt_range_message,
+                MainActivity.KEY_TILT_RANGE, true, null));
+        body.addView(gap(), new LinearLayout.LayoutParams(1, px(12)));
         body.addView(apiKeyCard());
         scroll.addView(body);
         root.addView(scroll, new LinearLayout.LayoutParams(
@@ -153,11 +159,12 @@ public final class SettingsActivity extends Activity {
         card.addView(top);
         card.addView(itemNote(R.string.transparency_message));
 
-        final LabelPreview preview = new LabelPreview(this);
+        preview = new LabelPreview(this);
         final int start = prefs.getInt(MainActivity.KEY_LABEL_TRANSPARENCY,
                 WorldView.DEFAULT_LABEL_TRANSPARENCY);
         value.setText(getString(R.string.percent_fmt, start));
         preview.setTransparency(start);
+        preview.setShowDistance(!prefs.getBoolean(MainActivity.KEY_HIDE_PIN_DISTANCE, false));
 
         SeekBar bar = new SeekBar(this);
         bar.setMax(100 / TRANSPARENCY_STEP);
@@ -192,31 +199,42 @@ public final class SettingsActivity extends Activity {
         return card;
     }
 
-    /** The tilt-driven range: a switch, saved the moment it is flipped. */
-    private View tiltRangeCard() {
+    /**
+     * A card that is one switch: title, switch, and what it does underneath.
+     * Saved the moment it is flipped, and {@code onChange} is for anything on
+     * this screen that has to follow it, like the sample label.
+     */
+    private View switchCard(int title, int message, String key, boolean byDefault,
+                            java.util.function.Consumer<Boolean> onChange) {
         LinearLayout card = card();
 
         LinearLayout top = new LinearLayout(this);
         top.setOrientation(LinearLayout.HORIZONTAL);
         top.setGravity(Gravity.CENTER_VERTICAL);
-        top.addView(itemTitle(R.string.tilt_range_title),
+        top.addView(itemTitle(title),
                 new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         Switch sw = new Switch(this);
-        sw.setChecked(prefs.getBoolean(MainActivity.KEY_TILT_RANGE, true));
+        sw.setChecked(prefs.getBoolean(key, byDefault));
         int[][] states = {{android.R.attr.state_checked}, {}};
         sw.setThumbTintList(new ColorStateList(states,
                 new int[]{WorldView.COL_TARGET, WorldView.COL_DIM}));
         sw.setTrackTintList(new ColorStateList(states,
                 new int[]{WorldView.COL_TARGET, WorldView.COL_GRID}));
-        sw.setOnCheckedChangeListener((b, on) ->
-                prefs.edit().putBoolean(MainActivity.KEY_TILT_RANGE, on).apply());
-        sw.setContentDescription(getString(R.string.tilt_range_title));
+        sw.setOnCheckedChangeListener((b, on) -> {
+            prefs.edit().putBoolean(key, on).apply();
+            if (onChange != null) onChange.accept(on);
+        });
+        sw.setContentDescription(getString(title));
         top.addView(sw);
         card.addView(top);
-        card.addView(itemNote(R.string.tilt_range_message));
+        card.addView(itemNote(message));
         // The whole card toggles, not just the small switch.
         card.setOnClickListener(v -> sw.toggle());
         return card;
+    }
+
+    private View gap() {
+        return new View(this);
     }
 
     private View apiKeyCard() {
@@ -353,6 +371,8 @@ public final class SettingsActivity extends Activity {
         private final Path tail = new Path();
         private final RectF box = new RectF();
         private final String sample, sampleDist;
+        /** Follows the "no distance on the pin" switch, so the shape is the real one. */
+        private boolean showDistance = true;
 
         LabelPreview(Context ctx) {
             super(ctx);
@@ -388,6 +408,12 @@ public final class SettingsActivity extends Activity {
             invalidate();
         }
 
+        void setShowDistance(boolean show) {
+            if (show == showDistance) return;
+            showDistance = show;
+            invalidate();
+        }
+
         @Override
         protected void onDraw(Canvas c) {
             int w = getWidth(), h = getHeight();
@@ -403,7 +429,7 @@ public final class SettingsActivity extends Activity {
             drawStake(c, w * 0.42f, h * 0.62f);
 
             float bw = name.measureText(sample) + 12 * dp;
-            float bh = 48 * dp;
+            float bh = (showDistance ? 48 : 30) * dp;
             float left = w * 0.42f - bw / 2f, top = (h - bh) / 2f - 6 * dp;
             box.set(left, top, left + bw, top + bh);
             path.rewind();
@@ -421,7 +447,7 @@ public final class SettingsActivity extends Activity {
             c.drawPath(path, bg);
             c.drawPath(path, edge);
             c.drawText(sample, box.centerX(), top + 22 * dp, name);
-            c.drawText(sampleDist, box.centerX(), top + 41 * dp, dist);
+            if (showDistance) c.drawText(sampleDist, box.centerX(), top + 41 * dp, dist);
         }
 
         private void drawStake(Canvas c, float x, float y) {

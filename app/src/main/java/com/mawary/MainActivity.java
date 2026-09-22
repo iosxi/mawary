@@ -3,6 +3,7 @@ package com.mawary;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -11,6 +12,7 @@ import android.graphics.Color;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
@@ -45,6 +47,7 @@ public final class MainActivity extends Activity
     static final String KEY_API = "places_api_key";
     static final String KEY_LABEL_TRANSPARENCY = "label_transparency";
     static final String KEY_TILT_RANGE = "tilt_range";
+    static final String KEY_HIDE_PIN_DISTANCE = "hide_pin_distance";
 
     private WorldView view;
     private Heading heading;
@@ -77,6 +80,7 @@ public final class MainActivity extends Activity
         view.setListener(this);
         view.setLabelTransparency(labelTransparency());
         view.setTiltRange(tiltRange());
+        view.setHidePinDistance(hidePinDistance());
         setContentView(view);
 
         // After setContentView: the insets controller hangs off the decor view,
@@ -106,6 +110,11 @@ public final class MainActivity extends Activity
 
     private boolean tiltRange() {
         return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_TILT_RANGE, true);
+    }
+
+    private boolean hidePinDistance() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(KEY_HIDE_PIN_DISTANCE, false);
     }
 
     @Override
@@ -323,6 +332,39 @@ public final class MainActivity extends Activity
                 Toast.LENGTH_SHORT).show();
     }
 
+    /**
+     * A place was tapped, in the field or in the list: hand it to Google Maps.
+     *
+     * <p>A pin at the coordinates we already hold, labelled with the name, and
+     * not a search for the name: the coordinates are what the place actually
+     * is here, while a search for "セブン-イレブン" from a moving phone can land
+     * on a different branch a street away.
+     *
+     * <p>Google Maps is asked for by name, since that is what was asked for,
+     * and any other map app takes it if Maps is not installed. Both are tried
+     * rather than resolved first: resolving would need the package declared
+     * visible, and a throw is cheap and cannot go stale.
+     */
+    @Override
+    public void onPlaceTapped(Poi place) {
+        String at = place.lat + "," + place.lon;
+        String pin = place.name == null || place.name.isEmpty() ? at : at + "(" + place.name + ")";
+        Intent i = new Intent(Intent.ACTION_VIEW,
+                Uri.parse("geo:" + at + "?q=" + Uri.encode(pin)));
+        i.setPackage("com.google.android.apps.maps");
+        try {
+            startActivity(i);
+            return;
+        } catch (ActivityNotFoundException noMaps) {
+            i.setPackage(null);
+        }
+        try {
+            startActivity(i);
+        } catch (ActivityNotFoundException noMapAtAll) {
+            Toast.makeText(this, R.string.no_map_app, Toast.LENGTH_SHORT).show();
+        }
+    }
+
     /** The gear: a full screen of settings, told what the main screen knows. */
     @Override
     public void onSettingsTapped() {
@@ -340,6 +382,7 @@ public final class MainActivity extends Activity
     private void applySettings() {
         view.setLabelTransparency(labelTransparency());
         view.setTiltRange(tiltRange());
+        view.setHidePinDistance(hidePinDistance());
         String stored = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_API, "");
         if (stored.equals(appliedKey)) return;
         appliedKey = stored;

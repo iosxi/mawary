@@ -35,6 +35,7 @@
     <string name="err_osm">OSM: %1$s</string>
     <string name="err_busy">地図サーバが混雑しています。少し待ちます</string>
     <string name="no_compass">この端末には方位センサがありません</string>
+    <string name="no_map_app">地図アプリが見つかりません</string>
     <string name="location_denied">位置情報が許可されていません</string>
 
     <!-- 検索 -->
@@ -52,6 +53,8 @@
     <string name="section_search">検索</string>
     <string name="transparency_title">ラベルの透過度</string>
     <string name="transparency_message">名前の札の地をどれだけ透かすか。0% で不透明、100% で地なし。下の見本がその場で変わります。</string>
+    <string name="pin_distance_title">ピンに距離を描画しない</string>
+    <string name="pin_distance_message">札から距離を消し、名前だけの短い札にします。札が小さくなるぶん、混み合ったときに読みやすくなります。下の一覧には距離が出たままです。</string>
     <string name="tilt_range_title">傾きで範囲を決める</string>
     <string name="tilt_range_message">スマホを立てるほど遠く（最大 10km）、寝かせるほど近く（最小 100m）を探します。オンの間は範囲のスライダーが灰色になり、指では動かせません。</string>
     <string name="percent_fmt">%1$d%%</string>

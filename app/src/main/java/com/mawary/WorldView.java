@@ -48,6 +48,8 @@ final class WorldView extends View {
         void onSearchTapped();
         /** The gear: the user wants the settings screen. */
         void onSettingsTapped();
+        /** A label or a list row was tapped: the user wants this place on a map. */
+        void onPlaceTapped(Poi place);
     }
 
     /**
@@ -218,8 +220,17 @@ final class WorldView extends View {
 
     /** Set while a finger is on the range slider, so taps elsewhere stay unclaimed. */
     private boolean sliding;
-    /** Set while a finger is dragging the list. */
+    /** Set while a finger is down in the list, whether it goes on to drag or not. */
     private boolean scrolling;
+    /** Set once a finger in the list has moved far enough to be a drag, not a tap. */
+    private boolean dragged;
+    /** Set while a finger is down on a label out in the field. */
+    private boolean tappingLabel;
+    /** The place a finger is on, lit while it is held. Null when none is. */
+    private Poi pressedPlace;
+    /** Where a finger went down, to tell a tap from a drag. */
+    private float downY;
+    private final int touchSlop;
     /** Which button a finger went down on: BTN_NONE, BTN_SEARCH or BTN_SETTINGS. */
     private int pressed = BTN_NONE;
     private static final int BTN_NONE = 0, BTN_SEARCH = 1, BTN_SETTINGS = 2;
@@ -250,6 +261,11 @@ final class WorldView extends View {
     private int searchedIndex = rangeIndex;
     /** The tilt sets the range, and the slider only shows it. */
     private boolean tiltRange;
+    /**
+     * Whether the bubbles out in the field leave the distance out. The list
+     * below keeps it either way: the field is where the crowding is.
+     */
+    private boolean hidePinDistance;
     private final Runnable commitRange = this::commitRange;
     private String query = "";
 
@@ -284,6 +300,7 @@ final class WorldView extends View {
     WorldView(Context ctx) {
         super(ctx);
         dp = ctx.getResources().getDisplayMetrics().density;
+        touchSlop = android.view.ViewConfiguration.get(ctx).getScaledTouchSlop();
         setBackgroundColor(COL_BG);
         setKeepScreenOn(true);
 
@@ -407,6 +424,13 @@ final class WorldView extends View {
     void setLabelTransparency(int percent) {
         int pct = Math.max(0, Math.min(100, percent));
         pLabelBg.setAlpha(Math.round(255 * (100 - pct) / 100f));
+        postInvalidateOnAnimation();
+    }
+
+    /** Whether the field labels drop the distance and carry the name alone. */
+    void setHidePinDistance(boolean hide) {
+        if (hide == hidePinDistance) return;
+        hidePinDistance = hide;
         postInvalidateOnAnimation();
     }
 
@@ -534,8 +558,14 @@ final class WorldView extends View {
     }
 
     /**
-     * The buttons, the range slider and the list each own
-     * their patch; a tap anywhere else is deliberately unclaimed.
+     * The buttons, the range slider, the labels and the list each own their
+     * patch; a tap anywhere else is deliberately unclaimed.
+     *
+     * <p>A label and a list row are the same thing said twice, so both answer
+     * a tap the same way: lit while the finger is down, and on the way up, if
+     * the finger is still on what it started on, that place goes to the map.
+     * In the list a tap has to be told from a drag, so nothing opens when the
+     * list was only being scrolled.
      */
     @Override
     public boolean onTouchEvent(MotionEvent event) {
@@ -575,22 +605,69 @@ final class WorldView extends View {
             }
             return true;
         }
+        // Labels sit out in the field, where nothing else claims a tap.
+        if (action == MotionEvent.ACTION_DOWN && !sliding) {
+            Poi hit = labelAt(event.getX(), event.getY());
+            if (hit != null) {
+                tappingLabel = true;
+                pressedPlace = hit;
+                postInvalidateOnAnimation();
+                return true;
+            }
+        }
+        if (tappingLabel) {
+            if (action == MotionEvent.ACTION_UP) {
+                tappingLabel = false;
+                performClick();
+                if (labelAt(event.getX(), event.getY()) == pressedPlace && pressedPlace != null
+                        && listener != null) {
+                    listener.onPlaceTapped(pressedPlace);
+                }
+                pressedPlace = null;
+                postInvalidateOnAnimation();
+            } else if (action == MotionEvent.ACTION_CANCEL) {
+                tappingLabel = false;
+                pressedPlace = null;
+                postInvalidateOnAnimation();
+            }
+            return true;
+        }
         if (action == MotionEvent.ACTION_DOWN && event.getY() >= listTop
-                && event.getY() <= listTop + listViewH && listContentH > listViewH) {
+                && event.getY() <= listTop + listViewH) {
             scrolling = true;
+            dragged = false;
             lastTouchY = event.getY();
+            downY = event.getY();
+            pressedPlace = rowAt(event.getY());
             getParent().requestDisallowInterceptTouchEvent(true);
+            postInvalidateOnAnimation();
             return true;
         }
         if (scrolling) {
             if (action == MotionEvent.ACTION_MOVE) {
                 float y = event.getY();
-                listScroll = clampScroll(listScroll - (y - lastTouchY));
+                if (!dragged && Math.abs(y - downY) > touchSlop) {
+                    dragged = true;
+                    pressedPlace = null;
+                }
+                if (dragged && listContentH > listViewH) {
+                    listScroll = clampScroll(listScroll - (y - lastTouchY));
+                }
                 lastTouchY = y;
                 postInvalidateOnAnimation();
-            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            } else if (action == MotionEvent.ACTION_UP) {
                 scrolling = false;
                 performClick();
+                if (!dragged && pressedPlace != null && rowAt(event.getY()) == pressedPlace
+                        && listener != null) {
+                    listener.onPlaceTapped(pressedPlace);
+                }
+                pressedPlace = null;
+                postInvalidateOnAnimation();
+            } else if (action == MotionEvent.ACTION_CANCEL) {
+                scrolling = false;
+                pressedPlace = null;
+                postInvalidateOnAnimation();
             }
             return true;
         }
@@ -614,6 +691,29 @@ final class WorldView extends View {
         if (searchBtn.contains(x, y)) return BTN_SEARCH;
         if (settingsBtn.contains(x, y)) return BTN_SETTINGS;
         return BTN_NONE;
+    }
+
+    /**
+     * Which label's box a finger is in, as the boxes were last drawn. Nearest
+     * first, which is the order they are drawn on top of each other in, so
+     * where two overlap the one you can see is the one you get. The tail is
+     * not part of it: what is tappable is what is framed.
+     */
+    private Poi labelAt(float x, float y) {
+        for (int i = 0; i < labelCount; i++) {
+            if (x >= labelBox[i * 4] && x <= labelBox[i * 4 + 2]
+                    && y >= labelBox[i * 4 + 1] && y <= labelBox[i * 4 + 3]) {
+                return labelPoi[i];
+            }
+        }
+        return null;
+    }
+
+    /** Which list row a finger is on, or null past the end of the list. */
+    private Poi rowAt(float y) {
+        if (y < listTop || y > listTop + listViewH) return null;
+        int i = (int) ((y - listTop + listScroll) / rowH);
+        return i >= 0 && i < ahead.size() ? ahead.get(i) : null;
     }
 
     private float clampScroll(float v) {
@@ -1015,6 +1115,9 @@ final class WorldView extends View {
 
     private void drawPlaces(Canvas canvas, float horizonY) {
         ahead.clear();
+        // Nothing is placed yet, so nothing is tappable yet: a stale box from
+        // the last frame would hand a tap to a label that is no longer there.
+        labelCount = 0;
         if (permissionNeeded) {
             centreMessage(canvas, sNeedPermission, horizonY);
             return;
@@ -1081,7 +1184,8 @@ final class WorldView extends View {
         int n = Math.min(ahead.size(), MAX_FIELD_LABELS);
         labelCount = n;
         final float padX = 6 * dp, padY = 3 * dp;
-        float h = padY + nameAsc + nameDesc + distAsc + distDesc + padY;
+        float h = padY + nameAsc + nameDesc + padY;
+        if (!hidePinDistance) h += distAsc + distDesc;
         // The slider, its end labels and the readout at whatever step it is
         // on, widened to where the readout could be.
         sliderArea.set(sliderX - 11 * dp - 8 * dp - pSmall.measureText("10.0km") - 16 * dp,
@@ -1090,7 +1194,7 @@ final class WorldView extends View {
         for (int i = 0; i < n; i++) {
             Poi p = ahead.get(i);
             labelPoi[i] = p;
-            float w = Math.max(p.nameW, p.distW) + 2 * padX;
+            float w = (hidePinDistance ? p.nameW : Math.max(p.nameW, p.distW)) + 2 * padX;
             labelW[i] = w;
             float px = p.sx, py = p.sy - stem - 5 * dp;
             for (int s = 0; s < SPOTS; s++) {
@@ -1271,13 +1375,25 @@ final class WorldView extends View {
             path.op(tail, Path.Op.UNION);
         }
         canvas.drawPath(path, pLabelBg);
+        // Lit while a finger is on it, so a tap is visibly landing on this one.
+        // The one paint is re-tinted rather than a second one used: the round
+        // join is what keeps the tail's point from growing a miter spike.
+        if (p == pressedPlace) {
+            pBubble.setColor(COL_TARGET);
+            pBubble.setStrokeWidth(2.4f * dp);
+        }
         canvas.drawPath(path, pBubble);
+        if (p == pressedPlace) {
+            pBubble.setColor(COL_BUBBLE);
+            pBubble.setStrokeWidth(1.4f * dp);
+        }
 
         float nameBase = top + 3 * dp + nameAsc;
         pName.setTextAlign(Paint.Align.CENTER);
         canvas.drawText(p.fieldLabel, mid, nameBase, pName);
         pName.setTextAlign(Paint.Align.LEFT);
 
+        if (hidePinDistance) return;
         pSmall.setTextAlign(Paint.Align.CENTER);
         pSmall.setColor(COL_DIM);
         canvas.drawText(p.distLabel, mid, nameBase + nameDesc + distAsc, pSmall);
@@ -1398,6 +1514,14 @@ final class WorldView extends View {
             for (int i = first; i < last; i++) {
                 Poi p = ahead.get(i);
                 float y = top + 20 * dp + i * rowH - listScroll;
+
+                // Lit while a finger is on it, the same as a label in the field.
+                if (p == pressedPlace) {
+                    float rowTop = top + i * rowH - listScroll;
+                    oval.set(pad, rowTop, w - pad, rowTop + rowH);
+                    pButton.setColor(COL_BUTTON_DOWN);
+                    canvas.drawRoundRect(oval, 6 * dp, 6 * dp, pButton);
+                }
 
                 float rel = Geo.delta180(p.bearingDeg, headingDeg);
                 String arrow = rel < -3f ? "<" : (rel > 3f ? ">" : "|");
