@@ -15,6 +15,7 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
@@ -24,11 +25,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Fetches the things around us.
  *
- * <p>Primary source is Google Places API (New) Nearby Search, which is what the
- * app is for. It needs an API key, so when none is configured, or when Google
- * turns the request down, we fall back to the Overpass API over OpenStreetMap
- * data, which needs no key. That keeps the app useful on first launch instead
- * of showing an empty ring; the screen always names the source it drew from.
+ * <p>The normal way to run this app is with no API key at all, so the keyless
+ * source — the Overpass API over OpenStreetMap data — is the one that has to
+ * work properly, not a token fallback. If a Google Places key <em>is</em>
+ * configured it takes precedence, since it matches what the user would see in
+ * Google Maps; without one, or when Google turns the request down, Overpass
+ * carries the app on its own. The screen always names the source it drew from.
  *
  * <p>All network work runs on one low-priority background thread. Requests are
  * coalesced: we refetch only after moving a meaningful fraction of the search
@@ -51,7 +53,16 @@ final class PlaceRepository {
     private static final int CONNECT_MS = 8_000;
     /** Overpass asks its own backend for up to 20 s, so the read wait has to outlast that. */
     private static final int READ_MS = 25_000;
+    /** How many places the view is given, nearest first. */
     private static final int MAX_RESULTS = 40;
+    /**
+     * How many Overpass may return before we pick. Overpass answers in no
+     * particular order, so asking it for MAX_RESULTS would handed us an
+     * arbitrary forty of the matches and quietly drop nearer ones. We take a
+     * wide net and sort it ourselves; a few hundred elements is a few tens of
+     * kilobytes.
+     */
+    private static final int OVERPASS_LIMIT = 250;
 
     /**
      * Overpass mirrors, tried in order. The main instance rate-limits and times
@@ -259,9 +270,13 @@ final class PlaceRepository {
                 + "node(" + around + ")[name][shop];"
                 + "node(" + around + ")[name][tourism];"
                 + "node(" + around + ")[name][leisure];"
+                + "node(" + around + ")[name][office];"
                 + "node(" + around + ")[name][railway=station];"
                 + "way(" + around + ")[name][amenity];"
-                + ");out center " + MAX_RESULTS + ";";
+                + "way(" + around + ")[name][shop];"
+                + "way(" + around + ")[name][tourism];"
+                + "way(" + around + ")[name][leisure];"
+                + ");out center " + OVERPASS_LIMIT + ";";
 
         HttpURLConnection c = open(endpoint);
         c.setRequestMethod("POST");
@@ -272,7 +287,7 @@ final class PlaceRepository {
         JSONArray elements = root.optJSONArray("elements");
         List<Poi> out = new ArrayList<>();
         if (elements == null) return out;
-        for (int i = 0; i < elements.length() && out.size() < MAX_RESULTS; i++) {
+        for (int i = 0; i < elements.length(); i++) {
             JSONObject el = elements.optJSONObject(i);
             if (el == null) continue;
             JSONObject tags = el.optJSONObject("tags");
@@ -297,7 +312,21 @@ final class PlaceRepository {
                             tags.optString("leisure", ""))));
             out.add(new Poi(name, kind, elat, elon));
         }
-        return out;
+        return nearest(out, lat, lon);
+    }
+
+    /**
+     * Keeps the MAX_RESULTS closest, since Overpass hands its matches back in
+     * whatever order it found them.
+     */
+    private static List<Poi> nearest(List<Poi> all, double lat, double lon) {
+        if (all.size() <= MAX_RESULTS) return all;
+        final double mPerDegLon = Geo.metersPerDegLon(lat);
+        for (int i = 0; i < all.size(); i++) {
+            all.get(i).relocate(lat, lon, mPerDegLon);
+        }
+        Collections.sort(all, (a, b) -> Float.compare(a.distM, b.distM));
+        return new ArrayList<>(all.subList(0, MAX_RESULTS));
     }
 
     // ------------------------------------------------------------------ HTTP

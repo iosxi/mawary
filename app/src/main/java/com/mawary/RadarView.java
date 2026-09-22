@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.Insets;
 import android.hardware.SensorManager;
@@ -58,6 +59,9 @@ final class RadarView extends View {
     private static final int COL_TARGET = 0xFFFFC46B;
     private static final int COL_TEXT = 0xFFE2FAF6;
     private static final int COL_DIM = 0xFFA6CFD0;
+    /** North is red here for the same reason it is red on a real compass. */
+    private static final int COL_NORTH = 0xFFFF5A5A;
+    private static final int COL_SOUTH = 0xFF93ADAD;
 
     private final Paint pGrid = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pRing = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -67,8 +71,12 @@ final class RadarView extends View {
     private final Paint pTextM = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pTextL = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pTextDim = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pDial = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pNorth = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pSouth = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final Path path = new Path();
+    private final RectF dial = new RectF();
     /** Baselines already taken by plan labels this frame, so they can be nudged apart. */
     private final float[] labelSlots = new float[MAX_PLAN_LABELS];
     private int labelSlotCount;
@@ -119,11 +127,16 @@ final class RadarView extends View {
         stroke(pRing, COL_MID, 1.6f);
         stroke(pAccent, COL_ACCENT, 2.2f);
         stroke(pTarget, COL_TARGET, 2.4f);
+        stroke(pDial, COL_MID, 1.6f);
+        pNorth.setStyle(Paint.Style.FILL);
+        pNorth.setColor(COL_NORTH);
+        pSouth.setStyle(Paint.Style.FILL);
+        pSouth.setColor(COL_SOUTH);
         Typeface mono = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD);
-        text(pTextS, COL_TEXT, 16f, mono);
-        text(pTextM, COL_TEXT, 21f, mono);
-        text(pTextL, COL_ACCENT, 46f, mono);
-        text(pTextDim, COL_DIM, 14f, mono);
+        text(pTextS, COL_TEXT, 19f, mono);
+        text(pTextM, COL_TEXT, 26f, mono);
+        text(pTextL, COL_ACCENT, 56f, mono);
+        text(pTextDim, COL_DIM, 17f, mono);
 
         setRangeIndex(rangeIndex, false);
 
@@ -277,12 +290,12 @@ final class RadarView extends View {
         float top0 = 16 * dp + insetTop;
         float bottom0 = 16 * dp + insetBottom;
         pad = 16 * dp;
-        tapeY = top0 + 122 * dp;
+        tapeY = top0 + 140 * dp;
         tapeHalfW = (w - 2 * pad) / 2f;
         tapePxPerDeg = tapeHalfW / 55f;          // the tape shows +/-55 degrees
 
-        rowH = 38 * dp;
-        listTop = h - bottom0 - MAX_LIST_ROWS * rowH - 22 * dp;
+        rowH = 46 * dp;
+        listTop = h - bottom0 - MAX_LIST_ROWS * rowH - 24 * dp;
 
         float top = tapeY + 40 * dp;
         float avail = listTop - top - 24 * dp;
@@ -316,23 +329,23 @@ final class RadarView extends View {
     }
 
     private void drawHeader(Canvas canvas, int w) {
-        float y = insetTop + 36 * dp;
+        float y = insetTop + 40 * dp;
         pTextM.setColor(COL_ACCENT);
         canvas.drawText("M A W A R Y", pad, y, pTextM);
         pTextM.setColor(COL_TEXT);
 
         pTextDim.setTextAlign(Paint.Align.RIGHT);
         canvas.drawText(source.isEmpty() ? "SCANNING" : source, w - pad, y, pTextDim);
-        canvas.drawText(fixLabel, w - pad, y + 18 * dp, pTextDim);
+        canvas.drawText(fixLabel, w - pad, y + 23 * dp, pTextDim);
         pTextDim.setTextAlign(Paint.Align.LEFT);
 
         // Heading readout: the bearing the back of the phone is aimed at.
         pTextL.setTextAlign(Paint.Align.CENTER);
-        canvas.drawText(headingLabel, cx - 18 * dp, insetTop + 90 * dp, pTextL);
+        canvas.drawText(headingLabel, cx - 22 * dp, insetTop + 106 * dp, pTextL);
         pTextL.setTextAlign(Paint.Align.LEFT);
-        canvas.drawText("° " + cardinalLabel, cx + 22 * dp, insetTop + 90 * dp, pTextM);
+        canvas.drawText("° " + cardinalLabel, cx + 28 * dp, insetTop + 106 * dp, pTextM);
 
-        canvas.drawText(rangeLabel, pad, insetTop + 90 * dp, pTextDim);
+        canvas.drawText(rangeLabel, pad, insetTop + 106 * dp, pTextDim);
     }
 
     /** A strip of the compass rose around the current heading, with a centre caret. */
@@ -345,12 +358,12 @@ final class RadarView extends View {
             if (Math.abs(off) > tapeHalfW) continue;
             float x = cx + off;
             boolean major = ((d % 90) + 360) % 90 == 0;
-            canvas.drawLine(x, tapeY, x, tapeY - (major ? 13 : 7) * dp, major ? pRing : pGrid);
+            canvas.drawLine(x, tapeY, x, tapeY - (major ? 15 : 8) * dp, major ? pRing : pGrid);
             if (major) {
                 String label = Geo.CARDINAL_16[((((d / 90) % 4) + 4) % 4) * 4];
                 pTextS.setTextAlign(Paint.Align.CENTER);
-                pTextS.setColor("N".equals(label) ? COL_ACCENT : COL_DIM);
-                canvas.drawText(label, x, tapeY - 19 * dp, pTextS);
+                pTextS.setColor("N".equals(label) ? COL_NORTH : COL_DIM);
+                canvas.drawText(label, x, tapeY - 23 * dp, pTextS);
                 pTextS.setColor(COL_TEXT);
                 pTextS.setTextAlign(Paint.Align.LEFT);
             }
@@ -358,21 +371,23 @@ final class RadarView extends View {
 
         // Caret marking dead ahead.
         path.rewind();
-        path.moveTo(cx - 7 * dp, tapeY + 12 * dp);
+        path.moveTo(cx - 8 * dp, tapeY + 14 * dp);
         path.lineTo(cx, tapeY + 1 * dp);
-        path.lineTo(cx + 7 * dp, tapeY + 12 * dp);
+        path.lineTo(cx + 8 * dp, tapeY + 14 * dp);
         canvas.drawPath(path, pAccent);
     }
 
     /** The plan view: us at the centre, heading up. */
     private void drawPlan(Canvas canvas) {
+        // The compass sits at the back of the plan, under everything else.
+        drawFlatCompass(canvas);
+
         // Range rings.
         canvas.drawCircle(cx, cy, radius, pRing);
         canvas.drawCircle(cx, cy, radius * 2f / 3f, pGrid);
-        canvas.drawCircle(cx, cy, radius / 3f, pGrid);
 
-        // Cross hairs, broken at the centre so the origin mark stays readable.
-        float gap = 13 * dp;
+        // Cross hairs, stopping clear of the compass.
+        float gap = radius * 0.46f;
         canvas.drawLine(cx, cy - radius, cx, cy - gap, pGrid);
         canvas.drawLine(cx, cy + gap, cx, cy + radius, pGrid);
         canvas.drawLine(cx - radius, cy, cx - gap, cy, pGrid);
@@ -386,24 +401,19 @@ final class RadarView extends View {
         for (int i = 0; i < 4; i++) {
             float bearing = i * 90f;
             float rel = (float) Math.toRadians(Geo.delta180(bearing, headingDeg));
-            float rr = radius + 17 * dp;
+            float rr = radius + 21 * dp;
             float x = cx + rr * (float) Math.sin(rel);
             float y = cy - rr * (float) Math.cos(rel);
             pTextS.setTextAlign(Paint.Align.CENTER);
-            pTextS.setColor(i == 0 ? COL_ACCENT : COL_DIM);
-            canvas.drawText(Geo.CARDINAL_16[i * 4], x, y + 6 * dp, pTextS);
+            pTextS.setColor(i == 0 ? COL_NORTH : COL_DIM);
+            canvas.drawText(Geo.CARDINAL_16[i * 4], x, y + 7 * dp, pTextS);
             pTextS.setColor(COL_TEXT);
             pTextS.setTextAlign(Paint.Align.LEFT);
         }
 
         // Ring distance labels.
-        canvas.drawText(ringOutLabel, cx + 6 * dp, cy - radius + 20 * dp, pTextDim);
-        canvas.drawText(ringMidLabel, cx + 6 * dp, cy - radius * 2f / 3f + 20 * dp, pTextDim);
-
-        // Origin: us.
-        canvas.drawCircle(cx, cy, 5 * dp, pAccent);
-        canvas.drawLine(cx, cy - 9 * dp, cx, cy + 9 * dp, pAccent);
-        canvas.drawLine(cx - 9 * dp, cy, cx + 9 * dp, cy, pAccent);
+        canvas.drawText(ringOutLabel, cx + 7 * dp, cy - radius + 25 * dp, pTextDim);
+        canvas.drawText(ringMidLabel, cx + 7 * dp, cy - radius * 2f / 3f + 25 * dp, pTextDim);
 
         if (permissionNeeded) {
             centreMessage(canvas, "LOCATION PERMISSION REQUIRED");
@@ -440,19 +450,72 @@ final class RadarView extends View {
             float x = cx + r * sin, y = cy - r * cos;
 
             if (ahead) {
-                diamond(canvas, x, y, 8f * dp, pTarget);
+                diamond(canvas, x, y, 9f * dp, pTarget);
                 if (labelled < MAX_PLAN_LABELS) {
                     drawPlanLabel(canvas, p, x, y);
                     labelled++;
                 }
             } else {
-                diamond(canvas, x, y, 5f * dp, pGrid);
+                diamond(canvas, x, y, 5.5f * dp, pGrid);
             }
         }
 
         if (places.isEmpty()) {
             centreMessage(canvas, status.isEmpty() ? "SEARCHING..." : status);
         }
+    }
+
+    /**
+     * A magnetic compass lying flat on the ground, seen from where the phone is
+     * aimed. Turning the phone swings the needle; tipping it down opens the
+     * dial from a slit into a circle, so heading and pitch read at a glance
+     * without either being a number to decode.
+     *
+     * <p>True perspective would squash the dial to a bare line whenever the
+     * phone is level, which is precisely when it stops telling you anything.
+     * So the opening runs from 0.28 when level to 1.0 when aimed straight down:
+     * it still widens as you tip the phone, but never collapses.
+     */
+    private void drawFlatCompass(Canvas canvas) {
+        float rx = radius * 0.38f;
+        float open = (float) Math.abs(Math.sin(Math.toRadians(tiltDeg)));
+        float ry = rx * (0.28f + 0.72f * open);
+
+        dial.set(cx - rx, cy - ry, cx + rx, cy + ry);
+        canvas.drawOval(dial, pDial);
+
+        // Ticks every 30 degrees of true bearing, longer at the cardinals.
+        for (int b = 0; b < 360; b += 30) {
+            double rel = Math.toRadians(Geo.delta180(b, headingDeg));
+            float sin = (float) Math.sin(rel), cos = (float) Math.cos(rel);
+            float k = (b % 90 == 0) ? 0.80f : 0.90f;
+            canvas.drawLine(cx + rx * k * sin, cy - ry * k * cos,
+                    cx + rx * sin, cy - ry * cos, pDial);
+        }
+
+        // The needle, foreshortened along with the dial it sits on.
+        double relN = Math.toRadians(Geo.delta180(0f, headingDeg));
+        float sinN = (float) Math.sin(relN), cosN = (float) Math.cos(relN);
+        float nx = cx + rx * 0.78f * sinN, ny = cy - ry * 0.78f * cosN;
+        float sx = cx - rx * 0.78f * sinN, sy = cy + ry * 0.78f * cosN;
+        // The wings sit a quarter turn round the dial from the needle.
+        float wx = rx * 0.19f * cosN, wy = ry * 0.19f * sinN;
+
+        path.rewind();
+        path.moveTo(nx, ny);
+        path.lineTo(cx + wx, cy + wy);
+        path.lineTo(cx - wx, cy - wy);
+        path.close();
+        canvas.drawPath(path, pNorth);
+
+        path.rewind();
+        path.moveTo(sx, sy);
+        path.lineTo(cx + wx, cy + wy);
+        path.lineTo(cx - wx, cy - wy);
+        path.close();
+        canvas.drawPath(path, pSouth);
+
+        canvas.drawCircle(cx, cy, 5 * dp, pDial);
     }
 
     private void drawConeEdge(Canvas canvas, float deg) {
@@ -480,7 +543,7 @@ final class RadarView extends View {
      * mark, since the text may no longer sit beside it.
      */
     private void drawPlanLabel(Canvas canvas, Poi p, float x, float y) {
-        final float slotH = 40 * dp;
+        final float slotH = 48 * dp;
         float ty = y - 2 * dp;
         for (boolean moved = true; moved; ) {
             moved = false;
@@ -494,7 +557,7 @@ final class RadarView extends View {
         if (labelSlotCount < labelSlots.length) labelSlots[labelSlotCount++] = ty;
 
         boolean left = x > cx;
-        float tx = x + (left ? -13 * dp : 13 * dp);
+        float tx = x + (left ? -15 * dp : 15 * dp);
 
         if (Math.abs(ty - (y - 2 * dp)) > 1f) {
             canvas.drawLine(x, y, tx, ty - 3 * dp, pGrid);
@@ -504,7 +567,7 @@ final class RadarView extends View {
         pTextS.setTextAlign(left ? Paint.Align.RIGHT : Paint.Align.LEFT);
         canvas.drawText(ellipsise(p.name, pTextS, radius * 0.8f), tx, ty, pTextS);
         pTextS.setColor(COL_DIM);
-        canvas.drawText(p.distLabel, tx, ty + 19 * dp, pTextS);
+        canvas.drawText(p.distLabel, tx, ty + 24 * dp, pTextS);
         pTextS.setColor(COL_TEXT);
         pTextS.setTextAlign(Paint.Align.LEFT);
     }
@@ -519,17 +582,17 @@ final class RadarView extends View {
 
     /** The readable half: what is ahead, nearest first. */
     private void drawList(Canvas canvas, int w, int h) {
-        canvas.drawLine(pad, listTop - 14 * dp, w - pad, listTop - 14 * dp, pGrid);
+        canvas.drawLine(pad, listTop - 16 * dp, w - pad, listTop - 16 * dp, pGrid);
 
         if (inCone.isEmpty()) {
             pTextDim.setColor(COL_DIM);
             canvas.drawText(haveFix ? "NOTHING AHEAD - SWEEP AROUND" : "STAND BY",
-                    pad, listTop + 22 * dp, pTextDim);
+                    pad, listTop + 26 * dp, pTextDim);
         } else {
             int rows = Math.min(MAX_LIST_ROWS, inCone.size());
             for (int i = 0; i < rows; i++) {
                 Poi p = inCone.get(i);
-                float y = listTop + 22 * dp + i * rowH;
+                float y = listTop + 26 * dp + i * rowH;
                 boolean primary = i == 0;
 
                 // Turn indicator: which way to swing the phone to line the thing up.
@@ -539,9 +602,9 @@ final class RadarView extends View {
                 canvas.drawText(arrow, pad, y, pTextM);
 
                 pTextM.setColor(primary ? COL_TEXT : COL_DIM);
-                float distW = pTextM.measureText(p.distLabel) + 12 * dp;
-                canvas.drawText(ellipsise(p.name, pTextM, w - 2 * pad - 30 * dp - distW),
-                        pad + 30 * dp, y, pTextM);
+                float distW = pTextM.measureText(p.distLabel) + 14 * dp;
+                canvas.drawText(ellipsise(p.name, pTextM, w - 2 * pad - 34 * dp - distW),
+                        pad + 34 * dp, y, pTextM);
 
                 pTextM.setColor(primary ? COL_TARGET : COL_DIM);
                 pTextM.setTextAlign(Paint.Align.RIGHT);
@@ -565,7 +628,7 @@ final class RadarView extends View {
             note = "TAP: RANGE   LONG PRESS: API KEY";
         }
         pTextDim.setColor(COL_DIM);
-        canvas.drawText(note, pad, h - insetBottom - 20 * dp, pTextDim);
+        canvas.drawText(note, pad, h - insetBottom - 22 * dp, pTextDim);
     }
 
     /** Trims a label to fit, in whole characters, without allocating when it already fits. */
