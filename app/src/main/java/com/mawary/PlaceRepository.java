@@ -725,7 +725,12 @@ final class PlaceRepository {
     }
 
     private List<Poi> fetchOverpass(String endpoint, String body) throws Exception {
-        String q = "[out:json][timeout:18];(" + body + ");out center " + OVERPASS_LIMIT + ";";
+        // "geom" rather than "center": the middle of a building is not where
+        // the building is. Measured on the same Sapporo sweep, geom cost 9%
+        // more bytes (129.9 kB against 141.4 kB) and no extra time, and it is
+        // what lets a shop you are standing at read as a few metres away
+        // instead of eighteen.
+        String q = "[out:json][timeout:18];(" + body + ");out geom " + OVERPASS_LIMIT + ";";
 
         HttpURLConnection c = open(endpoint);
         c.setRequestMethod("POST");
@@ -744,15 +749,18 @@ final class PlaceRepository {
             String name = tags.optString("name", "");
             if (name.isEmpty()) continue;
 
+            double[][] rings = outlineOf(el);
+            boolean closed = rings != null && encloses(el, rings);
+
             double elat, elon;
             if (el.has("lat")) {
                 elat = el.optDouble("lat", Double.NaN);
                 elon = el.optDouble("lon", Double.NaN);
             } else {
-                JSONObject ctr = el.optJSONObject("center");
-                if (ctr == null) continue;
-                elat = ctr.optDouble("lat", Double.NaN);
-                elon = ctr.optDouble("lon", Double.NaN);
+                double[] mid = middleOf(el, rings);
+                if (mid == null) continue;
+                elat = mid[0];
+                elon = mid[1];
             }
             if (Double.isNaN(elat) || Double.isNaN(elon)) continue;
 
@@ -766,9 +774,101 @@ final class PlaceRepository {
                     break;
                 }
             }
-            out.add(new Poi(name, tagKey, kind, elat, elon));
+            out.add(new Poi(name, tagKey, kind, elat, elon, rings, closed));
         }
         return out;
+    }
+
+    /**
+     * The boundary of an area element, or null when it has none. A way carries
+     * its own {@code geometry}; a relation carries one per member, and those
+     * are kept as they come — separate pieces that happen to join up — because
+     * nothing downstream needs them stitched into whole rings.
+     */
+    private static double[][] outlineOf(JSONObject el) {
+        JSONArray own = el.optJSONArray("geometry");
+        if (own != null) {
+            double[] ring = ringOf(own);
+            return ring == null ? null : new double[][]{ring};
+        }
+        JSONArray members = el.optJSONArray("members");
+        if (members == null) return null;
+        List<double[]> rings = new ArrayList<>();
+        for (int i = 0; i < members.length(); i++) {
+            JSONObject m = members.optJSONObject(i);
+            if (m == null) continue;
+            double[] ring = ringOf(m.optJSONArray("geometry"));
+            if (ring != null) rings.add(ring);
+        }
+        return rings.isEmpty() ? null : rings.toArray(new double[0][]);
+    }
+
+    /** One run of points, flattened to lat, lon, lat, lon…; null if too short. */
+    private static double[] ringOf(JSONArray pts) {
+        if (pts == null || pts.length() < 2) return null;
+        double[] ring = new double[pts.length() * 2];
+        int n = 0;
+        for (int i = 0; i < pts.length(); i++) {
+            JSONObject p = pts.optJSONObject(i);
+            if (p == null) continue;
+            double plat = p.optDouble("lat", Double.NaN);
+            double plon = p.optDouble("lon", Double.NaN);
+            if (Double.isNaN(plat) || Double.isNaN(plon)) continue;
+            ring[n++] = plat;
+            ring[n++] = plon;
+        }
+        if (n < 4) return null;
+        return n == ring.length ? ring : java.util.Arrays.copyOf(ring, n);
+    }
+
+    /**
+     * Whether the outline shuts, which is what makes "am I inside it" worth
+     * asking. A way shuts when OSM repeated its first node at the end, which is
+     * how a closed way is written; a relation only when it says it is a
+     * multipolygon or a boundary. Anything else — a named line, a bus route
+     * that happens to carry a shop tag — stays open, and an open outline is
+     * only ever measured to, never stood in. Getting this wrong would not
+     * misplace the thing, but the crossing count would be meaningless and could
+     * call somewhere far off "0m".
+     */
+    private static boolean encloses(JSONObject el, double[][] rings) {
+        if ("relation".equals(el.optString("type"))) {
+            JSONObject tags = el.optJSONObject("tags");
+            String t = tags == null ? "" : tags.optString("type", "");
+            return "multipolygon".equals(t) || "boundary".equals(t);
+        }
+        double[] r = rings[0];
+        return r[0] == r[r.length - 2] && r[1] == r[r.length - 1];
+    }
+
+    /**
+     * The middle of an area: Overpass's own {@code bounds} when it sent one,
+     * otherwise the middle of the outline we have. Only the map link and the
+     * inside-it bearing use this — the distance shown comes off the outline.
+     */
+    private static double[] middleOf(JSONObject el, double[][] rings) {
+        JSONObject b = el.optJSONObject("bounds");
+        if (b != null) {
+            return new double[]{
+                    (b.optDouble("minlat") + b.optDouble("maxlat")) / 2,
+                    (b.optDouble("minlon") + b.optDouble("maxlon")) / 2};
+        }
+        if (rings == null) {
+            JSONObject ctr = el.optJSONObject("center");
+            if (ctr == null) return null;
+            return new double[]{ctr.optDouble("lat", Double.NaN), ctr.optDouble("lon", Double.NaN)};
+        }
+        double minLat = Double.MAX_VALUE, maxLat = -Double.MAX_VALUE;
+        double minLon = Double.MAX_VALUE, maxLon = -Double.MAX_VALUE;
+        for (double[] ring : rings) {
+            for (int i = 0; i < ring.length; i += 2) {
+                minLat = Math.min(minLat, ring[i]);
+                maxLat = Math.max(maxLat, ring[i]);
+                minLon = Math.min(minLon, ring[i + 1]);
+                maxLon = Math.max(maxLon, ring[i + 1]);
+            }
+        }
+        return new double[]{(minLat + maxLat) / 2, (minLon + maxLon) / 2};
     }
 
     /**
