@@ -31,6 +31,8 @@ final class Poi {
     final double[][] rings;
     /** Whether {@link #rings} closes, so "am I standing in it" is a fair question. */
     final boolean closed;
+    /** One of {@link PlaceRepository#LANDMARKS}: named first when names run short. */
+    final boolean landmark;
 
     /** Great-circle-ish distance from us, in metres. */
     float distM;
@@ -71,6 +73,16 @@ final class Poi {
         this.lon = lon;
         this.rings = rings;
         this.closed = closed;
+        this.landmark = isLandmark(key, kind);
+    }
+
+    private static boolean isLandmark(String key, String kind) {
+        if (key.isEmpty()) return false;
+        String tag = key + "=" + kind;
+        for (String l : PlaceRepository.LANDMARKS) {
+            if (l.equals(tag)) return true;
+        }
+        return false;
     }
 
     /** Recomputes distance, bearing and the distance label against a new origin. */

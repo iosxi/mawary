@@ -197,8 +197,11 @@ final class PlaceRepository {
             {"\u5c71|yama", "natural=peak", "natural=volcano"},
     };
 
-    /** What a wide, unfiltered sweep looks for. */
-    private static final String[] LANDMARKS = {
+    /**
+     * What a wide, unfiltered sweep looks for, on top of the near one. The
+     * view also names these first when there are more places than names.
+     */
+    static final String[] LANDMARKS = {
             "natural=peak", "natural=volcano", "railway=station",
             "tourism=attraction", "tourism=viewpoint", "historic=castle",
             "amenity=hospital", "amenity=university",
@@ -533,7 +536,10 @@ final class PlaceRepository {
                     try {
                         List<Poi> got = Photon.nearby(groups, lat, lon, radiusM, net);
                         if (!got.isEmpty()) {
-                            result = nearest(got, lat, lon, OVERPASS_LIMIT);
+                            // Six groups can bring 300; cutting the far ones
+                            // would cut exactly the landmarks the wide sweep asked for.
+                            result = radiusM > WIDE_RADIUS ? got
+                                    : nearest(got, lat, lon, OVERPASS_LIMIT);
                             source = sourceOsm;
                         }
                     } catch (Exception e) {
@@ -887,18 +893,27 @@ final class PlaceRepository {
             // split up rather than having them compete for one fifty.
             return chunk(photonTags(tags), 2);
         }
+        String[][] near = {
+                {"amenity"},
+                {"shop"},
+                {"leisure", "tourism", "office", "railway:station"},
+        };
         if (radiusM > WIDE_RADIUS) {
+            // The landmarks are added to the near sweep, not swapped for it.
+            // Swapped, widening from 2 km to 5 km took away nearly everything
+            // that had been showing: measured at two spots in suburban Sapporo,
+            // 124 of the 126 places the 2 km sweep found were gone at 5 km, and
+            // at one of them the 5 km answer was seven places in all. Each
+            // group is a nearest-fifty, so the near sweep costs the same three
+            // requests at any radius.
             return new String[][]{
+                    near[0], near[1], near[2],
                     {"natural:peak", "natural:volcano"},
                     {"railway:station", "tourism:attraction", "tourism:viewpoint"},
                     {"historic:castle", "amenity:hospital", "amenity:university"},
             };
         }
-        return new String[][]{
-                {"amenity"},
-                {"shop"},
-                {"leisure", "tourism", "office", "railway:station"},
-        };
+        return near;
     }
 
     /** Breaks a tag list into requests of at most {@code per} tags each. */

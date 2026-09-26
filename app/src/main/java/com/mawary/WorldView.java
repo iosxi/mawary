@@ -54,10 +54,16 @@ final class WorldView extends View {
 
     /**
      * Ranges reach far enough to be useful with a search word: mountains are
-     * not 2 km away. Past WIDE_RADIUS the unfiltered sweep asks only for
-     * landmarks, so the far end stays answerable.
+     * not 2 km away. Past WIDE_RADIUS the unfiltered sweep adds landmarks to
+     * the near sweep rather than asking for everything that far out, so the
+     * far end stays answerable.
+     *
+     * <p>Each step is at most 1.7 times the last. They used to be seven,
+     * 100/200/500/1000/2000/5000/10000, and two and a half times was too big
+     * a step to widen by just a little.
      */
-    private static final int[] RANGES = {100, 200, 500, 1000, 2000, 5000, 10000};
+    private static final int[] RANGES =
+            {100, 150, 200, 300, 500, 700, 1000, 1500, 2000, 3000, 5000, 7000, 10000};
 
     /** Half-width of the field of view. The screen spans exactly this each way. */
     private static final float SPAN = 90f;
@@ -256,7 +262,7 @@ final class WorldView extends View {
     private boolean busy;
     private boolean permissionNeeded;
 
-    private int rangeIndex = 3;   // 1000 m
+    private int rangeIndex = 6;   // 1000 m
     /** The step the last search was sent for, so a return to it sends none. */
     private int searchedIndex = rangeIndex;
     /** The tilt sets the range, and the slider only shows it. */
@@ -1183,6 +1189,27 @@ final class WorldView extends View {
     private void layoutLabels(float stem) {
         int n = Math.min(ahead.size(), MAX_FIELD_LABELS);
         labelCount = n;
+        // Which places get a name. Past the limit, landmarks go first and the
+        // nearest of the rest fill what is left: out at 5 km the near sweep
+        // brings a hundred shops and parks, and nearest-first alone would give
+        // every name to them and leave the mountains as bare stakes. Walking
+        // ahead in order keeps the chosen ones nearest first.
+        int landmarks = 0;
+        for (int i = 0; i < ahead.size(); i++) {
+            if (ahead.get(i).landmark) landmarks++;
+        }
+        int landmarkSlots = Math.min(landmarks, n), otherSlots = n - landmarkSlots;
+        for (int i = 0, k = 0; k < n; i++) {
+            Poi p = ahead.get(i);
+            if (p.landmark) {
+                if (landmarkSlots == 0) continue;
+                landmarkSlots--;
+            } else {
+                if (otherSlots == 0) continue;
+                otherSlots--;
+            }
+            labelPoi[k++] = p;
+        }
         final float padX = 6 * dp, padY = 3 * dp;
         float h = padY + nameAsc + nameDesc + padY;
         if (!hidePinDistance) h += distAsc + distDesc;
@@ -1192,8 +1219,7 @@ final class WorldView extends View {
                 sliderTop - 34 * dp, sliderX + 12 * dp, sliderBottom + 30 * dp);
 
         for (int i = 0; i < n; i++) {
-            Poi p = ahead.get(i);
-            labelPoi[i] = p;
+            Poi p = labelPoi[i];
             float w = (hidePinDistance ? p.nameW : Math.max(p.nameW, p.distW)) + 2 * padX;
             labelW[i] = w;
             float px = p.sx, py = p.sy - stem - 5 * dp;
