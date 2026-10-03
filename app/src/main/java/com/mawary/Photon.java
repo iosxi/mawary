@@ -16,7 +16,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -60,19 +62,33 @@ final class Photon {
 
     private Photon() {}
 
+    /** Hears what has arrived so far, each time another group comes back. */
+    interface Partial {
+        /** A copy, safe to keep; called on the fetching thread. */
+        void onSoFar(List<Poi> soFar);
+    }
+
     /**
      * Asks for everything of each given kind around a point, all at once, and
      * returns them merged. A group is a set of OSM tags that go in one request,
      * where {@code "shop"} means any shop and {@code "amenity:cafe"} means that
      * one value.
+     *
+     * <p>The groups are taken in the order they come back, not the order they
+     * went out, and {@code partial} hears each one as it lands. The requests do
+     * not finish together: Photon works through one caller's requests largely
+     * one after another — measured, three sent at once took 3.7 to 4.8 s in
+     * all, against 1.1 to 2.3 s for one alone — so the first group is in hand
+     * well before the last, and there is no reason to keep it off the screen.
      */
     static List<Poi> nearby(String[][] groups, double lat, double lon, int radiusM,
-                            ExecutorService pool) throws Exception {
+                            ExecutorService pool, Partial partial) throws Exception {
         final double radiusKm = Math.max(0.1, radiusM / 1000.0);
+        CompletionService<List<Poi>> cs = new ExecutorCompletionService<>(pool);
         List<Future<List<Poi>>> futures = new ArrayList<>(groups.length);
         for (String[] group : groups) {
             final String url = url(group, lat, lon, radiusKm);
-            futures.add(pool.submit(new Callable<List<Poi>>() {
+            futures.add(cs.submit(new Callable<List<Poi>>() {
                 @Override
                 public List<Poi> call() throws Exception {
                     return fetch(url);
@@ -84,25 +100,36 @@ final class Photon {
         Set<String> seen = new HashSet<>();
         Exception last = null;
         long deadline = System.currentTimeMillis() + BUDGET_MS;
-        for (Future<List<Poi>> f : futures) {
-            long left = deadline - System.currentTimeMillis();
-            try {
-                for (Poi p : f.get(Math.max(1, left), TimeUnit.MILLISECONDS)) {
-                    // The groups overlap at the edges, and a place tagged twice
-                    // would otherwise be drawn twice on the same spot.
-                    String id = p.name + "@" + Math.round(p.lat * 1e5)
-                            + "," + Math.round(p.lon * 1e5);
-                    if (seen.add(id)) out.add(p);
+        try {
+            for (int n = 0; n < futures.size(); n++) {
+                long left = deadline - System.currentTimeMillis();
+                Future<List<Poi>> f = left > 0 ? cs.poll(left, TimeUnit.MILLISECONDS) : null;
+                if (f == null) {
+                    last = new IllegalStateException("photon timed out");
+                    break;
                 }
-            } catch (ExecutionException e) {
-                Throwable cause = e.getCause();
-                last = cause instanceof Exception ? (Exception) cause
-                        : new IllegalStateException(String.valueOf(cause));
-                Log.w(TAG, "photon group failed (" + last.getMessage() + ")");
-            } catch (Exception e) {
-                last = e;
-                f.cancel(true);
+                try {
+                    for (Poi p : f.get()) {
+                        // The groups overlap at the edges, and a place tagged twice
+                        // would otherwise be drawn twice on the same spot.
+                        String id = p.name + "@" + Math.round(p.lat * 1e5)
+                                + "," + Math.round(p.lon * 1e5);
+                        if (seen.add(id)) out.add(p);
+                    }
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause();
+                    last = cause instanceof Exception ? (Exception) cause
+                            : new IllegalStateException(String.valueOf(cause));
+                    Log.w(TAG, "photon group failed (" + last.getMessage() + ")");
+                    continue;
+                }
+                // The last one is the whole answer, which the caller delivers itself.
+                if (partial != null && n < futures.size() - 1 && !out.isEmpty()) {
+                    partial.onSoFar(new ArrayList<>(out));
+                }
             }
+        } finally {
+            for (Future<List<Poi>> f : futures) f.cancel(true);
         }
         if (out.isEmpty() && last != null) throw last;
         return out;

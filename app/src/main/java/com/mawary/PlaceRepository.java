@@ -254,11 +254,24 @@ final class PlaceRepository {
         final List<Poi> places;
         final String source;
         final long at;
+        /** What was asked, from where (as rounded in the key), and how far it reached. */
+        final String q, at3;
+        final int radius;
+        /**
+         * Whether the answer for any smaller range is this one cut down to that
+         * range. True of Photon's answers and no others: see {@link #fromHand}.
+         */
+        final boolean nested;
 
-        Cached(List<Poi> places, String source, long at) {
+        Cached(List<Poi> places, String source, long at,
+               String q, double lat, double lon, int radius, boolean nested) {
             this.places = places;
             this.source = source;
             this.at = at;
+            this.q = q;
+            this.at3 = where(lat, lon);
+            this.radius = radius;
+            this.nested = nested;
         }
     }
     private volatile boolean inFlight;
@@ -302,8 +315,60 @@ final class PlaceRepository {
     }
 
     private static String cacheKey(String q, double lat, double lon, int radiusM) {
-        return q + "|" + radiusM + "|"
-                + Math.round(lat * 1000d) + "," + Math.round(lon * 1000d);
+        return q + "|" + radiusM + "|" + where(lat, lon);
+    }
+
+    private static String where(double lat, double lon) {
+        return Math.round(lat * 1000d) + "," + Math.round(lon * 1000d);
+    }
+
+    /**
+     * An answer for this range out of what is already held, or null if a
+     * request has to go out.
+     *
+     * <p>The answer to this very question if we have it; failing that, a
+     * wider answer from the same spot, cut down to this range. That second
+     * case is what makes narrowing the range cost nothing, and it is exact,
+     * not an approximation, for Photon: each of its requests returns the
+     * nearest fifty within the radius, so the answer for a smaller radius is
+     * the wider answer's members that fall inside it — every one of them if
+     * the fifty reached past the smaller radius, and the same fifty if they
+     * did not. Measured at Sapporo station: asking for amenities at 300 m,
+     * 750 m, 1.5 km and 3 km returned the identical fifty, the furthest 193 m
+     * away, and the 90 m answer was exactly the thirteen of those within 90 m.
+     *
+     * <p>So the screen's distance bands cannot be fetched separately to save
+     * time, as each band's request would return the same nearest fifty. What
+     * the nesting does buy is that one request at the widest range answers
+     * every range inside it.
+     */
+    private Cached fromHand(String q, double lat, double lon, int radiusM) {
+        long now = System.currentTimeMillis();
+        Cached exact = cache.get(cacheKey(q, lat, lon, radiusM));
+        if (exact != null && now - exact.at < CACHE_TTL_MS) return exact;
+
+        String here = where(lat, lon);
+        Cached best = null;
+        for (Cached c : cache.values()) {
+            if (!c.nested || c.radius < radiusM || now - c.at >= CACHE_TTL_MS) continue;
+            if (!c.q.equals(q) || !c.at3.equals(here)) continue;
+            if (best == null || c.at > best.at) best = c;
+        }
+        if (best == null) return null;
+        return new Cached(within(best.places, lat, lon, radiusM), best.source, best.at,
+                q, lat, lon, radiusM, true);
+    }
+
+    /** The places no further away than the range, measured from here. */
+    private static List<Poi> within(List<Poi> all, double lat, double lon, int radiusM) {
+        final double mPerDegLon = Geo.metersPerDegLon(lat);
+        List<Poi> out = new ArrayList<>();
+        for (int i = 0; i < all.size(); i++) {
+            Poi p = all.get(i);
+            p.relocate(lat, lon, mPerDegLon);
+            if (p.distM <= radiusM) out.add(p);
+        }
+        return out;
     }
 
     private boolean busy;
@@ -403,8 +468,8 @@ final class PlaceRepository {
      */
     void requestAround(double lat, double lon, int radiusM) {
         String key = cacheKey(lat, lon, radiusM);
-        Cached hit = cache.get(key);
-        if (hit != null && System.currentTimeMillis() - hit.at < CACHE_TTL_MS) {
+        Cached hit = fromHand(query, lat, lon, radiusM);
+        if (hit != null) {
             // Supersede anything still in the air: it is answering an older
             // question than the one we are about to satisfy from memory. This
             // comes before the "already on screen" check, because what is on
@@ -420,7 +485,8 @@ final class PlaceRepository {
             lastLon = lon;
             lastRadius = radiusM;
             lastFetchMs = hit.at;
-            Log.i(TAG, "requestAround: answered from cache, " + hit.places.size() + " held");
+            Log.i(TAG, "requestAround: answered from cache r=" + radiusM + "m, "
+                    + hit.places.size() + " held");
             deliveredKey = key;
             listener.onStatus("");
             listener.onPlaces(nearest(hit.places, lat, lon), hit.source);
@@ -433,8 +499,8 @@ final class PlaceRepository {
         // often sitting inside it. Show that straight away and let the real
         // query correct it when it lands.
         if (!query.isEmpty() && !key.equals(deliveredKey) && !key.equals(localKey)) {
-            Cached base = cache.get(cacheKey("", lat, lon, radiusM));
-            if (base != null && System.currentTimeMillis() - base.at < CACHE_TTL_MS) {
+            Cached base = fromHand("", lat, lon, radiusM);
+            if (base != null) {
                 String[] tags = topicFor(query);
                 List<Poi> found = tags == null
                         ? matching(base.places, query)
@@ -492,11 +558,14 @@ final class PlaceRepository {
         lastFetchMs = now;
 
         final int gen = generation.incrementAndGet();
+        final String asked = query;
         Log.i(TAG, "requestAround: fetching r=" + radiusM + "m key=" + !apiKey.isEmpty());
         io.execute(() -> {
             List<Poi> result = null;
             String source = null;
             String status = null;
+            int reach = radiusM;
+            boolean nested = false;
             if (!apiKey.isEmpty()) {
                 try {
                     result = fetchGooglePlaces(lat, lon, radiusM);
@@ -531,16 +600,46 @@ final class PlaceRepository {
             // Photon for everything else: the keyless source that answers in
             // about two seconds and does not refuse.
             if (result == null || result.isEmpty()) {
-                String[][] groups = photonGroups(radiusM);
+                // A Photon request costs the same at any radius — measured at
+                // Sapporo station, 1.1 to 1.6 s for 90 m and for 3 km alike —
+                // and the same groups serve every range up to WIDE_RADIUS. So
+                // ask for all of it: every narrower range is then cut from this
+                // one answer without going out again (see fromHand). With the
+                // range following the tilt, the range changes while a search is
+                // still out; measured on the phone, opening at 1 km and settling
+                // on 100 m cost 9.6 s for the first, a 1.5 s wait, and 3.3 s
+                // more for the second.
+                final int sweep = Math.max(radiusM, WIDE_RADIUS);
+                String[][] groups = photonGroups(sweep);
                 if (groups != null) {
                     try {
-                        List<Poi> got = Photon.nearby(groups, lat, lon, radiusM, net);
+                        List<Poi> got = Photon.nearby(groups, lat, lon, sweep, net,
+                                soFar -> main.post(() -> {
+                                    if (gen != generation.get()) return;
+                                    // The range has often moved on while this was
+                                    // out, and the request for it is held behind
+                                    // this one. Show what that one will show.
+                                    boolean held = pending && pendRadius <= sweep
+                                            && asked.equals(query);
+                                    double atLat = held ? pendLat : lat;
+                                    double atLon = held ? pendLon : lon;
+                                    List<Poi> shown = within(soFar, atLat, atLon,
+                                            held ? pendRadius : radiusM);
+                                    Log.i(TAG, "photon so far: " + soFar.size()
+                                            + ", " + shown.size() + " in range");
+                                    if (!shown.isEmpty()) {
+                                        listener.onPlaces(nearest(shown, atLat, atLon),
+                                                sourceOsm);
+                                    }
+                                }));
                         if (!got.isEmpty()) {
                             // Six groups can bring 300; cutting the far ones
                             // would cut exactly the landmarks the wide sweep asked for.
-                            result = radiusM > WIDE_RADIUS ? got
+                            result = sweep > WIDE_RADIUS ? got
                                     : nearest(got, lat, lon, OVERPASS_LIMIT);
                             source = sourceOsm;
+                            reach = sweep;
+                            nested = true;
                         }
                     } catch (Exception e) {
                         Log.w(TAG, "photon failed", e);
@@ -570,7 +669,9 @@ final class PlaceRepository {
             final List<Poi> out = result;
             final String src = source;
             final String msg = status;
-            Log.i(TAG, "fetch done: source=" + source
+            final int reached = reach;
+            final boolean cut = nested;
+            Log.i(TAG, "fetch done: source=" + source + " reach=" + reach + "m"
                     + " count=" + (result == null ? -1 : result.size()) + " status=" + status);
             main.post(() -> {
                 inFlight = false;
@@ -578,7 +679,8 @@ final class PlaceRepository {
                 if (out != null && !out.isEmpty()) {
                     // The whole answer goes in, not the trimmed one: a later
                     // word search reads it to answer without asking again.
-                    cache.put(key, new Cached(out, src, lastNetworkMs));
+                    cache.put(cacheKey(asked, lat, lon, reached), new Cached(out, src,
+                            lastNetworkMs, asked, lat, lon, reached, cut));
                     backoffMs = RETRY_MS;
                 }
                 if (pending) {
@@ -592,7 +694,8 @@ final class PlaceRepository {
                 if (msg != null) listener.onStatus(msg);
                 if (out != null) {
                     deliveredKey = key;
-                    listener.onPlaces(nearest(out, lat, lon), src);
+                    listener.onPlaces(nearest(cut ? within(out, lat, lon, radiusM) : out,
+                            lat, lon), src);
                 } else {
                     // Every endpoint refused. Come back to it rather than sitting
                     // on an error until the user happens to walk far enough, but
